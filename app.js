@@ -726,3 +726,193 @@ if (document.readyState === 'loading') {
 } else {
     setTimeout(injectPoseControls, 100); // Piccolo ritardo per assicurarsi che il bottone mocap sia iniettato
 }
+
+// ==========================================
+// 14. VISUAL DEBUGGER (2D OVERLAY & 3D CALIBRATION)
+// ==========================================
+
+const VisualDebugger = {
+    canvas: null,
+    ctx: null,
+    videoEl: document.getElementById('input_video'),
+    debugMeshes: {},
+    uiPanel: null,
+    activeOffsets: {},
+
+    // Mappatura dei landmark MediaPipe per le braccia e busto
+    // 11: Spalla Sx (Video), 12: Spalla Dx, 13: Gomito Sx, 14: Gomito Dx, 15: Polso Sx, 16: Polso Dx
+    targetLandmarks: [11, 12, 13, 14, 15, 16],
+    
+    // Corrispettivi nel rig 3D
+    boneMappings: {
+        11: 'rightupperarm', // Incrociato per il mirroring
+        12: 'leftupperarm',
+        13: 'rightforearm',
+        14: 'leftforearm',
+        15: 'righthand',
+        16: 'lefthand'
+    },
+
+    init() {
+        this.setup2DCanvas();
+        this.setupCalibrationUI();
+        
+        // Hook nel loop di rendering globale per aggiornare i dati UI
+        const originalAnimate = window.requestAnimationFrame;
+        const self = this;
+        window.requestAnimationFrame = function(callback) {
+            self.updateUI();
+            return originalAnimate(callback);
+        };
+    },
+
+    // --- PARTE 1: OVERLAY 2D SUL VIDEO ---
+    setup2DCanvas() {
+        if (!this.videoEl) return;
+        
+        this.canvas = document.createElement('canvas');
+        this.canvas.id = 'mocap-overlay';
+        this.canvas.style.cssText = `
+            position: absolute; top: 0; left: 0;
+            pointer-events: none; z-index: 10;
+        `;
+        
+        // Assicuriamoci che il video abbia un parent posizionato per l'absolute positioning
+        if (this.videoEl.parentElement) {
+            this.videoEl.parentElement.style.position = 'relative';
+            this.videoEl.parentElement.appendChild(this.canvas);
+        }
+
+        this.ctx = this.canvas.getContext('2d');
+    },
+
+    draw2DOverlay(poseLandmarks) {
+        if (!this.ctx || !this.videoEl || !poseLandmarks) return;
+
+        // Sincronizza dimensioni canvas con il video renderizzato
+        this.canvas.width = this.videoEl.clientWidth;
+        this.canvas.height = this.videoEl.clientHeight;
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
+        this.ctx.fillStyle = 'rgba(255, 0, 0, 0.8)';
+        this.ctx.font = '12px monospace';
+
+        this.targetLandmarks.forEach(index => {
+            const lm = poseLandmarks[index];
+            if (lm && lm.visibility > 0.4) {
+                const x = lm.x * this.canvas.width;
+                const y = lm.y * this.canvas.height;
+                
+                // Disegna quadrato rosso
+                this.ctx.fillRect(x - 6, y - 6, 12, 12);
+                
+                // Testo coordinate normalizzate MediaPipe
+                this.ctx.fillStyle = '#fff';
+                this.ctx.fillText(`[${index}] X:${lm.x.toFixed(2)} Y:${lm.y.toFixed(2)}`, x + 10, y + 4);
+                this.ctx.fillStyle = 'rgba(255, 0, 0, 0.8)'; // Resetta colore
+            }
+        });
+    },
+
+    // --- PARTE 2: BOX ROSSI SUL MODELLO 3D ---
+    attach3DDebugBoxes() {
+        if (!model) return;
+
+        const boxGeo = new THREE.BoxGeometry(0.08, 0.08, 0.08); // Cubo di 8cm
+        const boxMat = new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true, depthTest: false });
+
+        Object.values(this.boneMappings).forEach(boneName => {
+            const bone = findBone(boneName);
+            if (bone && !this.debugMeshes[boneName]) {
+                const mesh = new THREE.Mesh(boxGeo, boxMat);
+                // Inizializza l'offset a zero
+                this.activeOffsets[boneName] = { x: 0, y: 0, z: 0 }; 
+                bone.add(mesh); // Diventa figlio dell'osso, ne segue rotazione e posizione
+                this.debugMeshes[boneName] = mesh;
+            }
+        });
+    },
+
+    // --- PARTE 3: PANNELLO DI CONTROLLO COORDINATE E OFFSET ---
+    setupCalibrationUI() {
+        this.uiPanel = document.createElement('div');
+        this.uiPanel.id = 'calibration-panel';
+        this.uiPanel.style.cssText = `
+            position: fixed; top: 16px; right: 16px;
+            background: rgba(15, 20, 30, 0.9); color: #fff;
+            padding: 15px; border-radius: 8px; border: 1px solid #444;
+            font-family: monospace; font-size: 11px; z-index: 10000;
+            max-height: 90vh; overflow-y: auto; width: 320px;
+        `;
+        document.body.appendChild(this.uiPanel);
+        this.renderUIControls();
+    },
+
+    renderUIControls() {
+        let html = `<h3 style="margin: 0 0 10px 0; color: #ff5555;">Calibrazione Pivot (Offset)</h3>`;
+        html += `<p style="color:#aaa; font-size:10px; margin-bottom:15px;">Regola i quadrati rossi per centrarli sul giunto fisico del modello 3D.</p>`;
+
+        Object.values(this.boneMappings).forEach(boneName => {
+            html += `
+                <div style="margin-bottom: 12px; background: rgba(0,0,0,0.5); padding: 8px; border-radius: 4px;">
+                    <strong style="color: #00ffcc;">${boneName.toUpperCase()}</strong><br>
+                    Pos Assoluta: <span id="pos-world-${boneName}" style="color:#888;">-</span><br>
+                    
+                    <div style="display: flex; gap: 4px; margin-top: 6px;">
+                        <label>X <input type="range" min="-0.5" max="0.5" step="0.01" value="0" 
+                            oninput="VisualDebugger.updateOffset('${boneName}', 'x', this.value)"></label>
+                        <span id="off-x-${boneName}">0.00</span>
+                    </div>
+                    <div style="display: flex; gap: 4px;">
+                        <label>Y <input type="range" min="-0.5" max="0.5" step="0.01" value="0" 
+                            oninput="VisualDebugger.updateOffset('${boneName}', 'y', this.value)"></label>
+                        <span id="off-y-${boneName}">0.00</span>
+                    </div>
+                    <div style="display: flex; gap: 4px;">
+                        <label>Z <input type="range" min="-0.5" max="0.5" step="0.01" value="0" 
+                            oninput="VisualDebugger.updateOffset('${boneName}', 'z', this.value)"></label>
+                        <span id="off-z-${boneName}">0.00</span>
+                    </div>
+                </div>
+            `;
+        });
+        
+        const btn = document.createElement('button');
+        btn.innerText = "Aggiorna Nodi 3D";
+        btn.style.cssText = "width:100%; padding: 8px; background:#444; color:#fff; border:none; cursor:pointer;";
+        btn.onclick = () => this.attach3DDebugBoxes();
+        
+        this.uiPanel.innerHTML = html;
+        this.uiPanel.appendChild(btn);
+    },
+
+    updateOffset(boneName, axis, value) {
+        const val = parseFloat(value);
+        this.activeOffsets[boneName][axis] = val;
+        
+        // Aggiorna la posizione locale del quadrato rosso rispetto all'osso
+        if (this.debugMeshes[boneName]) {
+            this.debugMeshes[boneName].position[axis] = val;
+        }
+        
+        // Aggiorna il testo a schermo
+        const span = document.getElementById(`off-${axis}-${boneName}`);
+        if (span) span.innerText = val.toFixed(2);
+    },
+
+    updateUI() {
+        // Legge le coordinate World (Assolute) delle ossa per mostrare dove si trovano effettivamente nello spazio
+        Object.values(this.boneMappings).forEach(boneName => {
+            const bone = findBone(boneName);
+            const span = document.getElementById(`pos-world-${boneName}`);
+            if (bone && span) {
+                const worldPos = new THREE.Vector3();
+                bone.getWorldPosition(worldPos);
+                span.innerText = `X:${worldPos.x.toFixed(2)} Y:${worldPos.y.toFixed(2)} Z:${worldPos.z.toFixed(2)}`;
+            }
+        });
+    }
+};
+
+// Inizializza il debugger al caricamento
+document.addEventListener('DOMContentLoaded', () => VisualDebugger.init());
