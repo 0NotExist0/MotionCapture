@@ -255,7 +255,6 @@ const findBone = (targetName) => {
 // ==========================================
 const boneTargets = {}; 
 const boneRestQuats = {};
-const boneRestPositions = {};
 
 const setupRig = (loadedModel) => {
     UI.log("Setup Rig in corso...", 'info');
@@ -265,10 +264,8 @@ const setupRig = (loadedModel) => {
     scene.add(model);
     skeleton = {};
     
-    // Pulisci le mappe precedenti
     for (let key in boneTargets) delete boneTargets[key];
     for (let key in boneRestQuats) delete boneRestQuats[key];
-    for (let key in boneRestPositions) delete boneRestPositions[key];
 
     const defaultMaterial = new THREE.MeshStandardMaterial({
         color: 0xaaaaaa, roughness: 0.6, metalness: 0.1,
@@ -283,23 +280,15 @@ const setupRig = (loadedModel) => {
 
         if (obj.isSkinnedMesh && obj.skeleton) {
             obj.skeleton.bones.forEach((bone) => {
-                // Nome pulito per la mappa
-                let cleanName = bone.name.toLowerCase()
+                let name = bone.name.toLowerCase()
                     .replace(/mixamorig/gi, '')
                     .replace(/[:\s_]/g, '')
                     .trim();
                 
-                skeleton[cleanName] = bone;
-                boneRestQuats[cleanName] = bone.quaternion.clone();
-                boneRestPositions[cleanName] = bone.position.clone();
+                skeleton[name] = bone;
+                boneRestQuats[name] = bone.quaternion.clone(); 
                 boneCount++;
-                
-                // Debug: logga i nomi trovati
-                console.log(`Osso trovato: "${bone.name}" -> pulito: "${cleanName}"`);
             });
-            
-            // IMPORTANTE: abilita l'uso delle matrici dello scheletro
-            obj.skeleton.pose();
         }
     });
 
@@ -364,42 +353,28 @@ const setBoneTarget = (name, rotation, lerpSpeed = 0.35, inverts = { x: 1, y: 1,
     if (!isFinite(rotation.x) || isNaN(rotation.x)) return;
 
     const bone = findBone(name);
-    if (!bone) {
-        console.warn(`Osso non trovato: ${name}`);
-        return;
-    }
+    if (!bone) return;
 
     try {
-        // Nome pulito per recuperare il rest
-        let cleanName = bone.name.toLowerCase()
-            .replace(/mixamorig/gi, '')
-            .replace(/[:\s_]/g, '')
-            .trim();
-
-        // Applichiamo i moltiplicatori per correggere gli assi
+        // Applichiamo i moltiplicatori per correggere gli assi di Mixamo
         const rx = rotation.x * inverts.x;
         const ry = rotation.y * inverts.y;
         const rz = rotation.z * inverts.z;
 
-        // Crea quaternione dalla rotazione di Kalidokit
         const euler = new THREE.Euler(rx, ry, rz, 'XYZ');
-        const targetQuat = new THREE.Quaternion().setFromEuler(euler);
-        
-        // Per Mixamo: la rotazione va applicata come offset dalla T-Pose
-        // MOLTIPLICA a sinistra per applicare correttamente in spazio locale
-        const restQuat = boneRestQuats[cleanName] || new THREE.Quaternion();
-        
-        // IMPORTANTE: per Mixamo, moltiplica rest * target (non target * rest)
-        const finalQuat = new THREE.Quaternion().copy(restQuat).multiply(targetQuat);
+        const deltaQuat = new THREE.Quaternion().setFromEuler(euler);
+        const restQuat = boneRestQuats[name] || new THREE.Quaternion();
 
-        boneTargets[cleanName] = { 
-            bone: bone, 
-            target: finalQuat, 
-            lerp: lerpSpeed 
-        };
-    } catch (e) {
-        console.error(`Errore setBoneTarget per ${name}:`, e);
-    }
+        // Moltiplichiamo il delta corretto per la T-Pose originale
+        const targetQuat = new THREE.Quaternion().copy(restQuat).multiply(deltaQuat);
+
+        boneTargets[name] = { bone: bone, target: targetQuat, lerp: lerpSpeed };
+    } catch (e) {}
+};
+
+const isPartVisible = (landmarks, indices, minConf = 0.35) => {
+    if (!landmarks) return false;
+    return indices.every(i => landmarks[i] && landmarks[i].visibility > minConf);
 };
 
 // ==========================================
@@ -413,7 +388,7 @@ const onResults = (results) => {
 
     const poseLms = results.poseLandmarks;
     const faceLms = results.faceLandmarks;
-    const worldLandmarks = results.poseWorldLandmarks;
+    const worldLandmarks = results.poseWorldLandmarks || results.ea || results.za || null;
 
     const trackingState = {
         testa: !!faceLms,
@@ -426,12 +401,11 @@ const onResults = (results) => {
 
     dbg.updateParts(trackingState);
 
-    // FIX: Configurazione assi corretta per Mixamo
-    // Kalidokit usa un sistema Y-up, Mixamo è Z-up nelle braccia
-    const armFix = { x: -1, y: -1, z: 1 };  // INVERTITO rispetto al tuo codice
-    const legFix = { x: 1, y: 1, z: 1 };
-    const spineFix = { x: 1, y: 1, z: 1 };
-    const headFix = { x: 1, y: -1, z: -1 };  // Testa ha assi diversi
+    // --- CONFIGURAZIONE ASSI MIXAMO ---
+    // L'asse Z nelle braccia controlla il movimento su/giù.
+    // Invertendolo (z: -1), le braccia andranno giù quando le abbassi.
+    const armFix = { x: 1, y: 1, z: -1 }; 
+    const standardFix = { x: 1, y: 1, z: 1 };
 
     // --- LAYER POSE ---
     if (poseLms && worldLandmarks) {
@@ -443,49 +417,31 @@ const onResults = (results) => {
             dbg.setKali(!!rp);
 
             if (rp) {
-                console.log("Kalidokit Pose:", rp); // Debug
-                
                 if (trackingState.corpo) {
-                    if (rp.Hips) {
-                        // Hips position + rotation
-                        setBoneTarget("hips", rp.Hips.rotation, 0.3, spineFix);
-                        // Se vuoi anche muovere la posizione dei fianchi:
-                        if (rp.Hips.position) {
-                            const hipBone = findBone("hips");
-                            if (hipBone && boneRestPositions["hips"]) {
-                                const restPos = boneRestPositions["hips"];
-                                hipBone.position.set(
-                                    restPos.x + rp.Hips.position.x * 0.01,
-                                    restPos.y + rp.Hips.position.y * 0.01,
-                                    restPos.z + rp.Hips.position.z * 0.01
-                                );
-                            }
-                        }
-                    }
-                    if (rp.Spine) setBoneTarget("spine", rp.Spine, 0.3, spineFix);
-                    if (rp.Chest) setBoneTarget("spine1", rp.Chest, 0.3, spineFix);
+                    if (rp.Hips) setBoneTarget("hips", rp.Hips.rotation, 0.3, standardFix);
+                    if (rp.Spine) setBoneTarget("spine", rp.Spine, 0.3, standardFix);
                 }
                 
                 if (trackingState.braccioDx) {
                     setBoneTarget("rightupperarm", rp.RightUpperArm, 0.35, armFix);
-                    setBoneTarget("rightforearm", rp.RightLowerArm, 0.35, armFix);
-                    if (rp.RightHand) setBoneTarget("righthand", rp.RightHand, 0.35, armFix);
+                    setBoneTarget("rightforearm",  rp.RightLowerArm, 0.35, armFix);
+                    setBoneTarget("righthand", rp.RightHand, 0.35, armFix);
                 }
 
                 if (trackingState.braccioSx) {
-                    setBoneTarget("leftupperarm", rp.LeftUpperArm, 0.35, armFix);
-                    setBoneTarget("leftforearm", rp.LeftLowerArm, 0.35, armFix);
-                    if (rp.LeftHand) setBoneTarget("lefthand", rp.LeftHand, 0.35, armFix);
+                    setBoneTarget("leftupperarm",  rp.LeftUpperArm,  0.35, armFix);
+                    setBoneTarget("leftforearm",   rp.LeftLowerArm,  0.35, armFix);
+                    setBoneTarget("lefthand",  rp.LeftHand,  0.35, armFix);
                 }
 
                 if (trackingState.gambaDx) {
-                    setBoneTarget("rightupperleg", rp.RightUpperLeg, 0.3, legFix);
-                    setBoneTarget("rightlowerleg", rp.RightLowerLeg, 0.3, legFix);
+                    setBoneTarget("rightupperleg", rp.RightUpperLeg, 0.3, standardFix);
+                    setBoneTarget("rightlowerleg", rp.RightLowerLeg, 0.3, standardFix);
                 }
 
                 if (trackingState.gambaSx) {
-                    setBoneTarget("leftupperleg", rp.LeftUpperLeg, 0.3, legFix);
-                    setBoneTarget("leftlowerleg", rp.LeftLowerLeg, 0.3, legFix);
+                    setBoneTarget("leftupperleg",  rp.LeftUpperLeg,  0.3, standardFix);
+                    setBoneTarget("leftlowerleg",  rp.LeftLowerLeg,  0.3, standardFix);
                 }
             }
         } catch (error) {
@@ -504,10 +460,10 @@ const onResults = (results) => {
 
             if (rf && rf.head) {
                 const h = rf.head;
-                // FIX: Rotazione testa corretta per Mixamo
-                const headRot = { x: h.x * 0.8, y: -h.y * 0.8, z: -h.z * 0.8 };
-                setBoneTarget("neck", headRot, 0.35, headFix);
-                setBoneTarget("head", headRot, 0.35, headFix);
+                // La testa in Kalidokit è già esportata con questi modificatori specifici
+                const headRot = { x: -h.x * 0.5, y: h.y * 0.5, z: -h.z * 0.5 };
+                setBoneTarget("neck", headRot, 0.35, standardFix);
+                setBoneTarget("head", headRot, 0.35, standardFix);
             }
         } catch (error) {
             console.warn("[Face solve error]", error);
@@ -563,18 +519,13 @@ try {
     requestAnimationFrame(animate);
     
     if (mocapActive && model) {
-        // Applica le rotazioni target con interpolazione
         for (const key in boneTargets) {
             const data = boneTargets[key];
-            if (data.bone && data.target) {
-                data.bone.quaternion.slerp(data.target, data.lerp);
-            }
+            data.bone.quaternion.slerp(data.target, data.lerp);
         }
-        
-        // IMPORTANTE: aggiorna la matrice world del modello e dello scheletro
-        model.updateMatrixWorld(true);
     }
 
+    if (model) model.updateMatrixWorld(true);
     controls.update();
     renderer.render(scene, camera);
 })();
