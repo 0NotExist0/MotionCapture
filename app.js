@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js'; // IMPORT AGGIUNTO QUI!
 import * as Kalidokit from 'kalidokit';
 
 // ==========================================
@@ -215,7 +216,7 @@ window.addEventListener('resize', () => {
     camera.aspect = viewport.clientWidth / viewport.clientHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(viewport.clientWidth, viewport.clientHeight);
-    // --- AGGIUNGI QUESTA RIGA QUI ---
+    
     if (MocapVisualAnnotations.css2dRenderer) {
         MocapVisualAnnotations.css2dRenderer.setSize(viewport.clientWidth, viewport.clientHeight);
     }
@@ -358,16 +359,12 @@ const setBoneTarget = (name, rotation, lerpSpeed = 0.35, map = { x: 'x', y: 'y',
 
     const restQuat = boneRestQuats[name] || new THREE.Quaternion();
 
-    // FALLBACK A T-POSE: essenziale per stabilizzare arti persi dalla webcam
     if (!isActive || !rotation) {
         boneTargets[name] = { bone: bone, target: restQuat, lerp: lerpSpeed * 0.5 };
         return;
     }
 
     try {
-        // SWIZZLING: Mappiamo dinamicamente gli assi VRM di Kalidokit 
-        // sui caotici assi locali di Mixamo. 
-        // Es: la rotazione X (map.x) potrebbe leggere il valore Z di Kalidokit.
         const rx = rotation[map.x] * map.ix;
         const ry = rotation[map.y] * map.iy;
         const rz = rotation[map.z] * map.iz;
@@ -375,7 +372,6 @@ const setBoneTarget = (name, rotation, lerpSpeed = 0.35, map = { x: 'x', y: 'y',
         const euler = new THREE.Euler(rx, ry, rz, 'XYZ');
         const deltaQuat = new THREE.Quaternion().setFromEuler(euler);
         
-        // Applichiamo la rotazione locale partendo rigorosamente dalla T-Pose zero
         const targetQuat = new THREE.Quaternion().copy(restQuat).multiply(deltaQuat);
 
         boneTargets[name] = { bone: bone, target: targetQuat, lerp: lerpSpeed };
@@ -389,20 +385,18 @@ const isPartVisible = (landmarks, indices, minConf = 0.35) => {
     return indices.every(i => landmarks[i] && landmarks[i].visibility > minConf);
 };
 
-
 // ==========================================
-// 9. CALLBACK MEDIAPIPE (CORE MIXAMO & MIRRORING)
+// 9. CALLBACK MEDIAPIPE E AGGIORNAMENTO DATI
 // ==========================================
 const videoElement = document.getElementById('input_video');
 
 const onResults = (results) => {
     dbg.updateFrame();
     
-    // --- AGGIUNTA PER L'OVERLAY 2D SULLA WEBCAM ---
+    // OVERLAY 2D SULLA WEBCAM
     if (typeof MocapVisualAnnotations !== 'undefined') {
         MocapVisualAnnotations.draw2DOverlay(results.poseLandmarks);
     }
-    // -----------------------------------------------
 
     if (!mocapActive || !model) return;
 
@@ -410,18 +404,81 @@ const onResults = (results) => {
     const faceLms = results.faceLandmarks;
     const worldLandmarks = results.poseWorldLandmarks || results.ea || results.za || null;
 
-    // ... [il resto del tuo codice originale per il tracciamento e il rig] ...
+    const trackingState = {
+        testa: !!faceLms,
+        corpo: isPartVisible(poseLms, [11, 12]), 
+        braccioSx: isPartVisible(poseLms, [13, 15]), 
+        braccioDx: isPartVisible(poseLms, [14, 16]), 
+        gambaSx: isPartVisible(poseLms, [25, 27]), 
+        gambaDx: isPartVisible(poseLms, [26, 28])
+    };
 
-    // --- AGGIUNTA PER AGGIORNARE LE COORDINATE 3D SUL MODELLO ---
+    dbg.updateParts(trackingState);
+
+    const mixamoSpineMap = { x: 'x', y: 'y', z: 'z', ix: 1, iy: 1, iz: -1 }; 
+    const mixamoLeftArmMap = { x: 'z', y: 'y', z: 'x', ix: -1, iy: 1, iz: 1 }; 
+    const mixamoRightArmMap = { x: 'z', y: 'y', z: 'x', ix: -1, iy: -1, iz: -1 }; 
+    const mixamoLegMap = { x: 'x', y: 'y', z: 'z', ix: 1, iy: -1, iz: 1 };
+
+    // RIG CORE SOLVER (Kalidokit)
+    if (poseLms && worldLandmarks) {
+        try {
+            const rp = Kalidokit.Pose.solve(
+                worldLandmarks, poseLms, { runtime: "mediapipe", video: videoElement }
+            );
+
+            dbg.setKali(!!rp);
+
+            if (rp) {
+                setBoneTarget("hips", rp.Hips ? rp.Hips.rotation : null, 0.3, mixamoSpineMap, trackingState.corpo);
+                setBoneTarget("spine", rp.Spine, 0.3, mixamoSpineMap, trackingState.corpo);
+
+                setBoneTarget("leftupperarm",  rp.RightUpperArm, 0.35, mixamoLeftArmMap, trackingState.braccioDx);
+                setBoneTarget("leftforearm",   rp.RightLowerArm, 0.35, mixamoLeftArmMap, trackingState.braccioDx);
+                setBoneTarget("lefthand",      rp.RightHand,     0.35, mixamoLeftArmMap, trackingState.braccioDx);
+
+                setBoneTarget("rightupperarm", rp.LeftUpperArm, 0.35, mixamoRightArmMap, trackingState.braccioSx);
+                setBoneTarget("rightforearm",  rp.LeftLowerArm, 0.35, mixamoRightArmMap, trackingState.braccioSx);
+                setBoneTarget("righthand",     rp.LeftHand,      0.35, mixamoRightArmMap, trackingState.braccioSx);
+
+                setBoneTarget("leftupperleg", rp.RightUpperLeg, 0.3, mixamoLegMap, trackingState.gambaDx);
+                setBoneTarget("leftlowerleg", rp.RightLowerLeg, 0.3, mixamoLegMap, trackingState.gambaDx);
+
+                setBoneTarget("rightupperleg",  rp.LeftUpperLeg,  0.3, mixamoLegMap, trackingState.gambaSx);
+                setBoneTarget("rightlowerleg",  rp.LeftLowerLeg,  0.3, mixamoLegMap, trackingState.gambaSx);
+            }
+        } catch (error) {
+            console.warn("[Pose solve error]", error);
+        }
+    } else {
+        dbg.setKali(false);
+    }
+
+    if (trackingState.testa) {
+        try {
+            const rf = Kalidokit.Face.solve(faceLms, {
+                runtime: "mediapipe", video: videoElement
+            });
+
+            if (rf && rf.head) {
+                const h = rf.head;
+                const headRot = { x: -h.x * 0.5, y: -h.y * 0.5, z: h.z * 0.5 };
+                setBoneTarget("neck", headRot, 0.35, { x: 'x', y: 'y', z: 'z', ix: 1, iy: 1, iz: 1 }, true);
+                setBoneTarget("head", headRot, 0.35, { x: 'x', y: 'y', z: 'z', ix: 1, iy: 1, iz: 1 }, true);
+            }
+        } catch (error) {
+            console.warn("[Face solve error]", error);
+        }
+    }
+
+    // AGGIORNAMENTO COORDINATE 3D DEI LABEL VISIVI SUL MODELLO
     if (trackingState.corpo) {
         for (const [schizzoId, config] of Object.entries(MocapVisualAnnotations.trackingJoints)) {
-            // Otteniamo le coordinate world (assolute) dell'osso
             const bone = findBone(config.boneName);
             if (bone) {
                 const worldPos = new THREE.Vector3();
                 bone.getWorldPosition(worldPos);
                 
-                // Aggiorniamo l'HTML dei label con i valori reali
                 const spanX = document.getElementById(`coord-x-${schizzoId}`);
                 const spanY = document.getElementById(`coord-y-${schizzoId}`);
                 const spanZ = document.getElementById(`coord-z-${schizzoId}`);
@@ -433,7 +490,6 @@ const onResults = (results) => {
             }
         }
     }
-    // ------------------------------------------------------------------
 };
 
 // ==========================================
@@ -499,10 +555,6 @@ try {
 // 12. GESTIONE SALVATAGGIO E CARICAMENTO POSE
 // ==========================================
 const PoseManager = {
-    /**
-     * Salva la posa attuale del modello in un file JSON
-     * @param {string} baseName Nome di base per il file esportato
-     */
     saveCurrentPose(baseName = "MocapPose") {
         if (!model || Object.keys(skeleton).length === 0) {
             UI.log("Errore: Nessun modello caricato. Impossibile salvare la posa.", "error");
@@ -515,47 +567,29 @@ const PoseManager = {
             bones: {}
         };
 
-        // Iteriamo su tutte le ossa mappate nell'oggetto skeleton
         for (const [boneName, bone] of Object.entries(skeleton)) {
-            // Salviamo la posizione e la rotazione (Quaternione) locale dell'osso
             poseData.bones[boneName] = {
-                position: {
-                    x: bone.position.x,
-                    y: bone.position.y,
-                    z: bone.position.z
-                },
-                quaternion: {
-                    x: bone.quaternion.x,
-                    y: bone.quaternion.y,
-                    z: bone.quaternion.z,
-                    w: bone.quaternion.w
-                }
+                position: { x: bone.position.x, y: bone.position.y, z: bone.position.z },
+                quaternion: { x: bone.quaternion.x, y: bone.quaternion.y, z: bone.quaternion.z, w: bone.quaternion.w }
             };
         }
 
-        // Serializzazione in JSON
         const jsonString = JSON.stringify(poseData, null, 2);
         const blob = new Blob([jsonString], { type: "application/json" });
         const url = URL.createObjectURL(blob);
 
-        // Creazione e trigger automatico del link di download
         const downloadLink = document.createElement('a');
         downloadLink.href = url;
         downloadLink.download = `${poseData.name}.json`;
         document.body.appendChild(downloadLink);
         downloadLink.click();
         
-        // Pulizia
         document.body.removeChild(downloadLink);
         URL.revokeObjectURL(url);
 
         UI.log(`📸 Posa salvata con successo: ${poseData.name}.json`, "info");
     },
 
-    /**
-     * Carica una posa da un file JSON e la applica al modello
-     * @param {string} jsonData Il contenuto testo del file JSON
-     */
     loadPose(jsonData) {
         if (!model || Object.keys(skeleton).length === 0) {
             UI.log("Errore: Nessun modello caricato su cui applicare la posa.", "error");
@@ -565,33 +599,19 @@ const PoseManager = {
         try {
             const poseData = JSON.parse(jsonData);
             
-            // Per disabilitare temporaneamente il tracking se attivo
             const wasMocapActive = mocapActive;
             if (wasMocapActive) {
-                document.getElementById('mocap-btn').click(); // Ferma il mocap
+                document.getElementById('mocap-btn').click();
             }
 
             for (const [boneName, transform] of Object.entries(poseData.bones)) {
                 const bone = skeleton[boneName];
                 if (bone) {
-                    // Ripristina la posizione locale
-                    bone.position.set(
-                        transform.position.x,
-                        transform.position.y,
-                        transform.position.z
-                    );
-                    
-                    // Ripristina la rotazione locale
-                    bone.quaternion.set(
-                        transform.quaternion.x,
-                        transform.quaternion.y,
-                        transform.quaternion.z,
-                        transform.quaternion.w
-                    );
+                    bone.position.set(transform.position.x, transform.position.y, transform.position.z);
+                    bone.quaternion.set(transform.quaternion.x, transform.quaternion.y, transform.quaternion.z, transform.quaternion.w);
                 }
             }
 
-            // Svuota i target del lerp per evitare che l'animator loop sovrascriva la posa statica
             for (let key in boneTargets) {
                 delete boneTargets[key];
             }
@@ -612,7 +632,6 @@ const injectPoseControls = () => {
     const controlsContainer = document.createElement('div');
     controlsContainer.style.cssText = 'margin-top: 10px; display: flex; gap: 8px; justify-content: space-between;';
 
-    // Pulsante di Salvataggio
     const saveBtn = document.createElement('button');
     saveBtn.innerText = '📸 Salva Frame';
     saveBtn.style.cssText = `
@@ -624,7 +643,6 @@ const injectPoseControls = () => {
     saveBtn.onmouseleave = () => saveBtn.style.background = '#2b5c8f';
     saveBtn.addEventListener('click', () => PoseManager.saveCurrentPose("CustomPose"));
 
-    // Input File Nascosto per il caricamento
     const fileInput = document.createElement('input');
     fileInput.type = 'file';
     fileInput.accept = '.json';
@@ -635,10 +653,9 @@ const injectPoseControls = () => {
         const reader = new FileReader();
         reader.onload = (event) => PoseManager.loadPose(event.target.result);
         reader.readAsText(file);
-        fileInput.value = ''; // Reset per ricaricare lo stesso file se necessario
+        fileInput.value = '';
     });
 
-    // Pulsante di Caricamento
     const loadBtn = document.createElement('button');
     loadBtn.innerText = '📂 Carica Posa';
     loadBtn.style.cssText = `
@@ -654,36 +671,25 @@ const injectPoseControls = () => {
     controlsContainer.appendChild(loadBtn);
     controlsContainer.appendChild(fileInput);
 
-    // Cerchiamo il contenitore del bottone del Mocap creato nello step 3 per affiancarli
     const mocapBtnWrapper = document.getElementById('mocap-btn')?.parentElement;
     
     if (mocapBtnWrapper) {
         mocapBtnWrapper.appendChild(controlsContainer);
     } else {
-        // Fallback se l'UI non è stata ancora renderizzata correttamente
         controlsContainer.style.cssText += 'position: fixed; top: 70px; left: 16px; z-index: 9998; width: 200px;';
         document.body.appendChild(controlsContainer);
     }
 };
 
-// Inietta la UI una volta che il DOM è pronto
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', injectPoseControls);
 } else {
-    setTimeout(injectPoseControls, 100); // Piccolo ritardo per assicurarsi che il bottone mocap sia iniettato
+    setTimeout(injectPoseControls, 100); 
 }
 
 // ==========================================
 // 14. VISUAL ANNOTATIONS MODULE (NEW)
 // ==========================================
-// Rimpiazza completamente il vecchio VisualDebugger
-// Implementa overlay 2D (video) e 3D (modello) come da schizzo utente.
-
-// È necessario aggiungere un renderer CSS2D per mostrare etichette HTML sul modello 3D
-// Assicurati che THREE.CSS2DRenderer sia caricato, ad esempio tramite script tag o import map.
-// Se non lo hai, aggiungi questa riga all'inizio del file, dopo gli altri import:
-// import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
-
 const MocapVisualAnnotations = {
     canvas: null,
     ctx: null,
@@ -691,8 +697,6 @@ const MocapVisualAnnotations = {
     css2dRenderer: null,
     labels3d: {},
 
-    // Configurazione dei punti da tracciare e numerare, mappando id schizzo a landmark/osso
-    // Schizzo Id 1: Spalla DX, 2: Gomito DX, 3: Mano DX
     trackingJoints: {
         1: { lmIdx: 12, boneName: 'rightupperarm' },
         2: { lmIdx: 14, boneName: 'rightforearm' },
@@ -703,7 +707,6 @@ const MocapVisualAnnotations = {
         this.setup2DCanvas();
         this.setup3DLabels();
         
-        // Hook nel loop di animazione principale per forzare il re-rendering dei label
         const originalAnimate = window.requestAnimationFrame;
         const self = this;
         window.requestAnimationFrame = function(callback) {
@@ -712,7 +715,6 @@ const MocapVisualAnnotations = {
         };
     },
 
-    // --- OVERLAY 2D SULLA WEBCAM ---
     setup2DCanvas() {
         if (!this.videoEl) return;
         
@@ -737,7 +739,6 @@ const MocapVisualAnnotations = {
         this.canvas.height = this.videoEl.clientHeight;
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
-        // Stile generale per i box e il testo
         const boxSize = 20;
         const textOffset = 8;
         this.ctx.font = '14px monospace';
@@ -748,19 +749,15 @@ const MocapVisualAnnotations = {
                 const x = lm.x * this.canvas.width;
                 const y = lm.y * this.canvas.height;
                 
-                // Disegna box rosso
                 this.ctx.lineWidth = 2;
                 this.ctx.strokeStyle = '#ff0000';
                 this.ctx.strokeRect(x - (boxSize/2), y - (boxSize/2), boxSize, boxSize);
                 
-                // Disegna numero dentro (colore di contrasto)
                 this.ctx.fillStyle = '#ff0000';
                 this.ctx.fillText(schizzoId, x - (textOffset/2), y + (textOffset/2));
 
-                // Disegna coordinate per il punto della mano (Id 3), esattamente come nello schizzo
                 if (schizzoId == '3') {
-                    this.ctx.fillStyle = '#00ffcc'; // Colore per i dati, come nello schizzo
-                    // Nello schizzo c'è "X: 30.1 Y: 40.5". Mostrerò i valori 2D normalizzati.
+                    this.ctx.fillStyle = '#00ffcc'; 
                     const text = ` X: ${lm.x.toFixed(2)} Y: ${lm.y.toFixed(2)}`;
                     this.ctx.fillText(text, x + (boxSize/2) + 5, y + (textOffset/2));
                 }
@@ -768,14 +765,12 @@ const MocapVisualAnnotations = {
         }
     },
 
-    // --- OVERLAY 3D SUL MODELLO ---
     setup3DLabels() {
-        if (!typeof CSS2DRenderer === 'undefined') {
-            console.error('THREE.CSS2DRenderer non trovato. Caricalo per gli overlay 3D.');
+        if (typeof CSS2DRenderer === 'undefined') {
+            console.error('THREE.CSS2DRenderer non trovato. Assicurati che import sia corretto.');
             return;
         }
 
-        // Creiamo il renderer CSS2D e lo agganciamo alla viewport
         this.css2dRenderer = new CSS2DRenderer();
         this.css2dRenderer.setSize(viewport.clientWidth, viewport.clientHeight);
         this.css2dRenderer.domElement.style.position = 'absolute';
@@ -783,34 +778,26 @@ const MocapVisualAnnotations = {
         this.css2dRenderer.domElement.style.pointerEvents = 'none';
         viewport.appendChild(this.css2dRenderer.domElement);
 
-        // Creiamo e agganciamo i label ossei una volta che il modello è caricato
         const self = this;
-        // Ascolta l'evento di completamento del setup del rig per aggiungere le etichette
-        // Dobbiamo assicurarsi che setupRig emetta un evento o modifichi una flag
-        // Per ora, creiamo una funzione che controllerà se il modello esiste
         this.create3DLabelsOnModelLoaded = () => {
-            if (!model) return; // Riprova finché il modello non è caricato
+            if (!model) return; 
 
             for (const [schizzoId, config] of Object.entries(this.trackingJoints)) {
-                if (self.labels3d[schizzoId]) continue; // Salta se già creato
+                if (self.labels3d[schizzoId]) continue; 
 
                 const bone = findBone(config.boneName);
                 if (bone) {
                     const labelDiv = self.create3DLabelElement(schizzoId);
                     const labelObject = new CSS2DObject(labelDiv);
                     bone.add(labelObject);
-                    // Rimuoviamo il wireframe box dal vecchio debugger
                     self.labels3d[schizzoId] = labelObject;
                 }
             }
         };
-        // Aggiungiamo un check all'init, e all'update per agganciare i label
-        // Se si ha un evento più pulito dal setupRig, usarlo.
         setTimeout(this.create3DLabelsOnModelLoaded, 500); 
     },
 
     create3DLabelElement(schizzoId) {
-        // Creazione dell'HTML div per il label 3D, formattato come nello schizzo
         const div = document.createElement('div');
         div.id = `label-3d-${schizzoId}`;
         div.style.cssText = `
@@ -826,7 +813,6 @@ const MocapVisualAnnotations = {
             gap: 4px;
         `;
 
-        // Box numerato
         const box = document.createElement('div');
         box.style.cssText = `
             width: 14px; height: 14px;
@@ -837,11 +823,9 @@ const MocapVisualAnnotations = {
         box.textContent = schizzoId;
         div.appendChild(box);
 
-        // Contenitore per i dati coordinate
         const dataContainer = document.createElement('div');
         dataContainer.id = `data-3d-${schizzoId}`;
         
-        // Etichette X/Y/Z con punti interrogativi per la mano (Id 3), come nello schizzo
         const isHand = schizzoId == '3';
         const qMark = isHand ? '?' : '';
         dataContainer.innerHTML = `
@@ -855,15 +839,11 @@ const MocapVisualAnnotations = {
     },
 
     update() {
-        this.create3DLabelsOnModelLoaded(); // Assicura che i label siano attaccati se il modello è pronto
-
+        this.create3DLabelsOnModelLoaded(); 
         if (!model || !this.css2dRenderer) return;
-
-        // Renderizza il layer CSS2D sopra la scena WebGL
         this.css2dRenderer.render(scene, camera);
     },
     
-    // Funzione helper per ottenere le coordinate world (assolute) di un osso
     getBoneWorldPos(boneName) {
         const bone = findBone(boneName);
         if (bone) {
@@ -875,5 +855,4 @@ const MocapVisualAnnotations = {
     }
 };
 
-// Inizializza il modulo al caricamento
 document.addEventListener('DOMContentLoaded', () => MocapVisualAnnotations.init());
