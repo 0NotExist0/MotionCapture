@@ -361,15 +361,19 @@ const setBoneTarget = (name, rotation, lerpSpeed = 0.35, inverts = { x: 1, y: 1,
         const ry = rotation.y * inverts.y;
         const rz = rotation.z * inverts.z;
 
+        // Ordine XYZ va bene se i delta provengono da Kalidokit, 
+        // ma i modificatori 'inverts' ora gestiranno lo specchio locale di Mixamo
         const euler = new THREE.Euler(rx, ry, rz, 'XYZ');
         const deltaQuat = new THREE.Quaternion().setFromEuler(euler);
         const restQuat = boneRestQuats[name] || new THREE.Quaternion();
 
-        // Moltiplichiamo il delta corretto per la T-Pose originale
+        // Moltiplichiamo il delta corretto per la T-Pose originale (Local Space)
         const targetQuat = new THREE.Quaternion().copy(restQuat).multiply(deltaQuat);
 
         boneTargets[name] = { bone: bone, target: targetQuat, lerp: lerpSpeed };
-    } catch (e) {}
+    } catch (e) {
+        console.error(`[Mocap Error] Fallito il targeting per ${name}:`, e);
+    }
 };
 
 const isPartVisible = (landmarks, indices, minConf = 0.35) => {
@@ -377,8 +381,9 @@ const isPartVisible = (landmarks, indices, minConf = 0.35) => {
     return indices.every(i => landmarks[i] && landmarks[i].visibility > minConf);
 };
 
+
 // ==========================================
-// 9. CALLBACK MEDIAPIPE (FIX BRACCIA ALZATE)
+// 9. CALLBACK MEDIAPIPE (FIX BRACCIA ALZATE E MIRRORING)
 // ==========================================
 const videoElement = document.getElementById('input_video');
 
@@ -393,8 +398,8 @@ const onResults = (results) => {
     const trackingState = {
         testa: !!faceLms,
         corpo: isPartVisible(poseLms, [11, 12]), 
-        braccioSx: isPartVisible(poseLms, [13, 15]), 
-        braccioDx: isPartVisible(poseLms, [14, 16]), 
+        braccioSx: isPartVisible(poseLms, [13, 15]), // SX rilevato da MediaPipe
+        braccioDx: isPartVisible(poseLms, [14, 16]), // DX rilevato da MediaPipe
         gambaSx: isPartVisible(poseLms, [25, 27]), 
         gambaDx: isPartVisible(poseLms, [26, 28])
     };
@@ -402,10 +407,17 @@ const onResults = (results) => {
     dbg.updateParts(trackingState);
 
     // --- CONFIGURAZIONE ASSI MIXAMO ---
-    // L'asse Z nelle braccia controlla il movimento su/giù.
-    // Invertendolo (z: -1), le braccia andranno giù quando le abbassi.
-    const armFix = { x: 1, y: 1, z: -1 }; 
+    // Risolviamo l'attorcigliamento: le ossa del lato DX hanno Y e Z speculari rispetto al SX.
     const standardFix = { x: 1, y: 1, z: 1 };
+    
+    // Il tuo fix originale per il braccio sinistro
+    const leftArmFix = { x: 1, y: 1, z: -1 }; 
+    // Il fix calcolato per il braccio destro (Y e Z invertiti per compensare lo scheletro speculare)
+    const rightArmFix = { x: 1, y: -1, z: 1 }; 
+
+    // Stessa logica precauzionale per le gambe
+    const leftLegFix = { x: 1, y: 1, z: 1 };
+    const rightLegFix = { x: 1, y: -1, z: -1 };
 
     // --- LAYER POSE ---
     if (poseLms && worldLandmarks) {
@@ -422,26 +434,36 @@ const onResults = (results) => {
                     if (rp.Spine) setBoneTarget("spine", rp.Spine, 0.3, standardFix);
                 }
                 
+                // ====================================================
+                // EFFETTO SPECCHIO (MIRRORING LOGICO)
+                // Mappiamo l'input DX di MediaPipe sull'osso SX del modello, e viceversa.
+                // Questo allinea i movimenti dell'Avatar a ciò che l'utente vede a schermo.
+                // ====================================================
+
                 if (trackingState.braccioDx) {
-                    setBoneTarget("rightupperarm", rp.RightUpperArm, 0.35, armFix);
-                    setBoneTarget("rightforearm",  rp.RightLowerArm, 0.35, armFix);
-                    setBoneTarget("righthand", rp.RightHand, 0.35, armFix);
+                    // Input Destro -> Osso Sinistro (Applichiamo il leftArmFix)
+                    setBoneTarget("leftupperarm",  rp.RightUpperArm, 0.35, leftArmFix);
+                    setBoneTarget("leftforearm",   rp.RightLowerArm, 0.35, leftArmFix);
+                    setBoneTarget("lefthand",      rp.RightHand,     0.35, leftArmFix);
                 }
 
                 if (trackingState.braccioSx) {
-                    setBoneTarget("leftupperarm",  rp.LeftUpperArm,  0.35, armFix);
-                    setBoneTarget("leftforearm",   rp.LeftLowerArm,  0.35, armFix);
-                    setBoneTarget("lefthand",  rp.LeftHand,  0.35, armFix);
+                    // Input Sinistro -> Osso Destro (Applichiamo il rightArmFix)
+                    setBoneTarget("rightupperarm", rp.LeftUpperArm, 0.35, rightArmFix);
+                    setBoneTarget("rightforearm",  rp.LeftLowerArm, 0.35, rightArmFix);
+                    setBoneTarget("righthand",     rp.LeftHand,     0.35, rightArmFix);
                 }
 
                 if (trackingState.gambaDx) {
-                    setBoneTarget("rightupperleg", rp.RightUpperLeg, 0.3, standardFix);
-                    setBoneTarget("rightlowerleg", rp.RightLowerLeg, 0.3, standardFix);
+                    // Input Destro -> Osso Sinistro
+                    setBoneTarget("leftupperleg", rp.RightUpperLeg, 0.3, leftLegFix);
+                    setBoneTarget("leftlowerleg", rp.RightLowerLeg, 0.3, leftLegFix);
                 }
 
                 if (trackingState.gambaSx) {
-                    setBoneTarget("leftupperleg",  rp.LeftUpperLeg,  0.3, standardFix);
-                    setBoneTarget("leftlowerleg",  rp.LeftLowerLeg,  0.3, standardFix);
+                    // Input Sinistro -> Osso Destro
+                    setBoneTarget("rightupperleg",  rp.LeftUpperLeg,  0.3, rightLegFix);
+                    setBoneTarget("rightlowerleg",  rp.LeftLowerLeg,  0.3, rightLegFix);
                 }
             }
         } catch (error) {
@@ -460,8 +482,8 @@ const onResults = (results) => {
 
             if (rf && rf.head) {
                 const h = rf.head;
-                // La testa in Kalidokit è già esportata con questi modificatori specifici
-                const headRot = { x: -h.x * 0.5, y: h.y * 0.5, z: -h.z * 0.5 };
+                // Aggiungiamo il mirroring asse Y anche alla testa in modo che guardi dalla parte giusta
+                const headRot = { x: -h.x * 0.5, y: -h.y * 0.5, z: h.z * 0.5 };
                 setBoneTarget("neck", headRot, 0.35, standardFix);
                 setBoneTarget("head", headRot, 0.35, standardFix);
             }
