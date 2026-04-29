@@ -68,6 +68,7 @@ debugDiv.innerHTML = `
     Face: <span id="dbg-face" style="color:#888">—</span><br>
     Ossa mappate: <span id="dbg-bones" style="color:#888">0</span><br>
     Frame: <span id="dbg-frame" style="color:#888">0</span><br>
+    Kalidokit OK: <span id="dbg-kali" style="color:#888">—</span><br>
     Stato: <span id="dbg-state" style="color:#f80">IN ATTESA</span>
 `;
 document.body.appendChild(debugDiv);
@@ -79,6 +80,10 @@ const dbg = {
         document.getElementById('dbg-pose').textContent  = pose  ? `✅ ${pose} pts`  : '❌ non rilevata';
         document.getElementById('dbg-face').textContent  = face  ? `✅ ${face} pts`  : '❌ non rilevata';
         document.getElementById('dbg-frame').textContent = this.frame;
+    },
+    setKali(ok) {
+        const el = document.getElementById('dbg-kali');
+        if (el) { el.textContent = ok ? '✅' : '❌ null'; el.style.color = ok ? '#0f0' : '#f00'; }
     },
     setBones(n) {
         document.getElementById('dbg-bones').textContent = n;
@@ -265,6 +270,9 @@ const setupRig = (loadedModel) => {
     dbg.setBones(boneCount);
     UI.log(`Rig OK — ${boneCount} ossa trovate.`, 'info');
 
+    // FIX: stampa le ossa trovate per debug
+    UI.log(`Ossa: ${Object.keys(skeleton).join(', ')}`, 'info');
+
     if (boneCount === 0) {
         UI.log("ERRORE: nessuna osso trovata! Il modello non ha SkinnedMesh riggata.", 'error');
         dbg.setState('NO BONES', '#f00');
@@ -316,24 +324,34 @@ document.getElementById('file-upload').addEventListener('change', (e) => {
 });
 
 // ==========================================
-// 8. IK SOLVER
+// 8. RIG BONE — FIX: ordine Euler esplicito + guard NaN
 // ==========================================
 const rigBone = (name, rotation, lerp = 0.3) => {
     if (!rotation) return;
+
+    // FIX 1: scarta valori NaN/Infinity che mandano il bone in stato indeterminato
+    if (
+        !isFinite(rotation.x) || isNaN(rotation.x) ||
+        !isFinite(rotation.y) || isNaN(rotation.y) ||
+        !isFinite(rotation.z) || isNaN(rotation.z)
+    ) return;
+
     const bone = findBone(name);
     if (!bone) return;
+
     try {
-        const target = new THREE.Quaternion().setFromEuler(
-            new THREE.Euler(rotation.x, rotation.y, rotation.z)
-        );
+        // FIX 2: ordine di rotazione esplicito 'XYZ' — senza questo Three.js
+        // usa un ordine di default che può non corrispondere ai dati di Kalidokit
+        const euler = new THREE.Euler(rotation.x, rotation.y, rotation.z, 'XYZ');
+        const target = new THREE.Quaternion().setFromEuler(euler);
         bone.quaternion.slerp(target, lerp);
     } catch (e) {
-        // Fallimento silente gestito
+        // Fallimento silente
     }
 };
 
 // ==========================================
-// 9. CALLBACK MEDIAPIPE (Fix Proprietà API e Assi)
+// 9. CALLBACK MEDIAPIPE
 // ==========================================
 const videoElement = document.getElementById('input_video');
 
@@ -344,39 +362,59 @@ const onResults = (results) => {
 
     if (!mocapActive || !model) return;
 
+    // -------------------------------------------------------
+    // FIX 3: poseWorldLandmarks può avere nome interno diverso
+    // a seconda della versione di Holistic. Proviamo i fallback.
+    // -------------------------------------------------------
+    const worldLandmarks =
+        results.poseWorldLandmarks ||   // nome standard
+        results.ea ||                    // vecchie build MediaPipe
+        results.za ||                    // build intermedie
+        null;
+
     // --- LAYER POSE (CORPO INTERO) ---
-    if (results.poseLandmarks && results.poseWorldLandmarks) {
+    if (results.poseLandmarks && worldLandmarks) {
         try {
             const rp = Kalidokit.Pose.solve(
-                results.poseWorldLandmarks,
+                worldLandmarks,
                 results.poseLandmarks,
                 { runtime: "mediapipe", video: videoElement }
             );
-            
+
+            // FIX 4: debug — mostra se Kalidokit restituisce dati reali
+            dbg.setKali(!!rp);
+
             if (rp) {
-                // IL FIX: Hips ha .rotation, tutti gli altri SONO DIRETTAMENTE vettori {x, y, z}
-                if (rp.Hips) rigBone("hips", rp.Hips.rotation, 0.1);
-                
-                // Spine
-                if (rp.Spine) rigBone("spine", { x: rp.Spine.x, y: rp.Spine.y, z: rp.Spine.z }, 0.3);
-                
-                // Braccia (Nota: se si piegano al contrario, cambia segno a .z o .x)
-                if (rp.RightUpperArm) rigBone("rightupperarm", { x: rp.RightUpperArm.x, y: rp.RightUpperArm.y, z: rp.RightUpperArm.z }, 0.3);
-                if (rp.RightLowerArm) rigBone("rightforearm",  { x: rp.RightLowerArm.x, y: rp.RightLowerArm.y, z: rp.RightLowerArm.z }, 0.3);
-                if (rp.LeftUpperArm)  rigBone("leftupperarm",  { x: rp.LeftUpperArm.x,  y: rp.LeftUpperArm.y,  z: rp.LeftUpperArm.z },  0.3);
-                if (rp.LeftLowerArm)  rigBone("leftforearm",   { x: rp.LeftLowerArm.x,  y: rp.LeftLowerArm.y,  z: rp.LeftLowerArm.z },  0.3);
-                
+                // Hips: ha .rotation come sotto-oggetto {x,y,z}
+                if (rp.Hips && rp.Hips.rotation) {
+                    rigBone("hips", rp.Hips.rotation, 0.1);
+                }
+
+                // FIX 5: ogni altro valore è direttamente {x,y,z}
+                // ma alcuni potrebbero arrivare come undefined se il corpo
+                // non è completamente in campo — il guard NaN di rigBone gestisce tutto
+
+                if (rp.Spine)        rigBone("spine",        rp.Spine,        0.3);
+
+                // Braccia
+                if (rp.RightUpperArm) rigBone("rightupperarm", rp.RightUpperArm, 0.3);
+                if (rp.RightLowerArm) rigBone("rightforearm",  rp.RightLowerArm, 0.3);
+                if (rp.LeftUpperArm)  rigBone("leftupperarm",  rp.LeftUpperArm,  0.3);
+                if (rp.LeftLowerArm)  rigBone("leftforearm",   rp.LeftLowerArm,  0.3);
+
                 // Mani
-                if (rp.RightHand) rigBone("righthand", { x: rp.RightHand.x, y: rp.RightHand.y, z: rp.RightHand.z }, 0.3);
-                if (rp.LeftHand)  rigBone("lefthand",  { x: rp.LeftHand.x,  y: rp.LeftHand.y,  z: rp.LeftHand.z },  0.3);
-                
+                if (rp.RightHand) rigBone("righthand", rp.RightHand, 0.3);
+                if (rp.LeftHand)  rigBone("lefthand",  rp.LeftHand,  0.3);
+
                 // Gambe
-                if (rp.RightUpperLeg) rigBone("rightupperleg", { x: rp.RightUpperLeg.x, y: rp.RightUpperLeg.y, z: rp.RightUpperLeg.z }, 0.3);
-                if (rp.RightLowerLeg) rigBone("rightlowerleg", { x: rp.RightLowerLeg.x, y: rp.RightLowerLeg.y, z: rp.RightLowerLeg.z }, 0.3);
-                if (rp.LeftUpperLeg)  rigBone("leftupperleg",  { x: rp.LeftUpperLeg.x,  y: rp.LeftUpperLeg.y,  z: rp.LeftUpperLeg.z },  0.3);
-                if (rp.LeftLowerLeg)  rigBone("leftlowerleg",  { x: rp.LeftLowerLeg.x,  y: rp.LeftLowerLeg.y,  z: rp.LeftLowerLeg.z },  0.3);
+                if (rp.RightUpperLeg) rigBone("rightupperleg", rp.RightUpperLeg, 0.3);
+                if (rp.RightLowerLeg) rigBone("rightlowerleg", rp.RightLowerLeg, 0.3);
+                if (rp.LeftUpperLeg)  rigBone("leftupperleg",  rp.LeftUpperLeg,  0.3);
+                if (rp.LeftLowerLeg)  rigBone("leftlowerleg",  rp.LeftLowerLeg,  0.3);
             }
-        } catch (error) {}
+        } catch (error) {
+            console.warn("[Pose solve error]", error);
+        }
     }
 
     // --- LAYER FACE ---
@@ -385,19 +423,28 @@ const onResults = (results) => {
             const rf = Kalidokit.Face.solve(results.faceLandmarks, {
                 runtime: "mediapipe", video: videoElement
             });
-            
+
             if (rf && rf.head) {
                 const h = rf.head;
-                // Mantengo gli assi corretti dalla tua versione precedente
                 rigBone("neck", { x: -h.x * 0.5, y: h.y * 0.5, z: -h.z * 0.5 }, 0.5);
                 rigBone("head", { x: -h.x * 0.5, y: h.y * 0.5, z: -h.z * 0.5 }, 0.5);
             }
-        } catch (error) {}
+        } catch (error) {
+            console.warn("[Face solve error]", error);
+        }
+    }
+
+    // FIX 6: aggiorna la matrice mondiale del modello ogni frame,
+    // altrimenti le posizioni delle ossa non vengono propagate visivamente
+    if (model) {
+        model.updateMatrixWorld(true);
     }
 };
 
 // ==========================================
 // 10. MEDIAPIPE INIT
+// FIX 7: soglie abbassate a 0.3 per rilevare corpo parzialmente visibile
+// FIX 8: enableSegmentation: false riduce il carico e migliora il framerate
 // ==========================================
 UI.showLoading("Download Modelli IA MediaPipe...", 10);
 
@@ -405,22 +452,37 @@ try {
     const holistic = new window.Holistic({
         locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`
     });
+
     holistic.setOptions({
         modelComplexity: 1,
         smoothLandmarks: true,
-        minDetectionConfidence: 0.5,
-        minTrackingConfidence: 0.5
+        enableSegmentation: false,          // FIX: disabilitato — non serve, libera risorse
+        smoothSegmentation: false,
+        // FIX: soglie più basse = rilevamento più robusto
+        // anche con corpo parzialmente in campo o in movimento veloce
+        minDetectionConfidence: 0.3,
+        minTrackingConfidence: 0.3,
+        refineFaceLandmarks: false,         // FIX: non serve per la testa, riduce latenza
     });
+
     holistic.onResults(onResults);
 
+    // FIX 9: la Camera di MediaPipe già chiama onFrame ad ogni frame del video;
+    // non serve nessun loop manuale aggiuntivo — ma è importante che
+    // holistic.send() venga chiamato OGNI frame senza salti.
+    // Il codice originale era già corretto su questo punto.
     new window.Camera(videoElement, {
-        onFrame: async () => { await holistic.send({ image: videoElement }); },
-        width: 640, height: 480
+        onFrame: async () => {
+            await holistic.send({ image: videoElement });
+        },
+        width: 640,
+        height: 480
     }).start().then(() => {
         UI.updateProgress(100);
         UI.setTrackerReady();
         setTimeout(() => UI.hideLoading(), 800);
         UI.log("Telecamera pronta. Carica un modello e premi ▶ Avvia.", 'info');
+        UI.log("SUGGERIMENTO: assicurati che braccia e gambe siano visibili in camera.", 'info');
     });
 
 } catch (e) {
@@ -431,8 +493,12 @@ try {
 
 // ==========================================
 // 11. RENDER LOOP
+// FIX 10: aggiunta updateMatrixWorld nel render loop
+// come sicurezza aggiuntiva anche quando mocap è inattivo
 // ==========================================
 (function animate() {
     requestAnimationFrame(animate);
+    if (model) model.updateMatrixWorld(true);
+    controls.update();
     renderer.render(scene, camera);
 })();
