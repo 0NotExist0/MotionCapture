@@ -49,45 +49,64 @@ const UI = {
 };
 
 // ==========================================
-// 2. DEBUG OVERLAY
+// 2. DEBUG OVERLAY MODULARE
 // ==========================================
 const debugDiv = document.createElement('div');
 debugDiv.id = 'mocap-debug';
 debugDiv.style.cssText = `
     position: fixed; bottom: 16px; right: 16px;
-    background: rgba(0,0,0,0.80); color: #0f0;
+    background: rgba(0,0,0,0.85); color: #0f0;
     font-family: monospace; font-size: 12px;
-    padding: 10px 14px; border-radius: 8px;
-    border: 1px solid #333; z-index: 9999;
-    min-width: 230px; line-height: 1.9;
+    padding: 12px 16px; border-radius: 8px;
+    border: 1px solid #444; z-index: 9999;
+    min-width: 240px; line-height: 1.8;
     pointer-events: none;
 `;
 debugDiv.innerHTML = `
-    <b style="color:#fff">MOCAP DEBUG</b><br>
-    Pose: <span id="dbg-pose" style="color:#888">—</span><br>
-    Face: <span id="dbg-face" style="color:#888">—</span><br>
-    Ossa mappate: <span id="dbg-bones" style="color:#888">0</span><br>
-    Frame: <span id="dbg-frame" style="color:#888">0</span><br>
-    Kalidokit OK: <span id="dbg-kali" style="color:#888">—</span><br>
-    Stato: <span id="dbg-state" style="color:#f80">IN ATTESA</span>
+    <b style="color:#fff">MOCAP TRACKING STATUS</b><hr style="border-color:#333; margin: 4px 0;">
+    Testa: <span id="dbg-testa" style="color:#888; float:right;">❌</span><br>
+    Corpo: <span id="dbg-corpo" style="color:#888; float:right;">❌</span><br>
+    Braccio Sinistro: <span id="dbg-armsx" style="color:#888; float:right;">❌</span><br>
+    Braccio Destro: <span id="dbg-armdx" style="color:#888; float:right;">❌</span><br>
+    Gamba Sinistra: <span id="dbg-legsx" style="color:#888; float:right;">❌</span><br>
+    Gamba Destra: <span id="dbg-legdx" style="color:#888; float:right;">❌</span><br>
+    <hr style="border-color:#333; margin: 4px 0;">
+    Ossa mappate: <span id="dbg-bones" style="color:#888; float:right;">0</span><br>
+    Frame: <span id="dbg-frame" style="color:#888; float:right;">0</span><br>
+    Kalidokit OK: <span id="dbg-kali" style="color:#888; float:right;">—</span><br>
+    Stato: <span id="dbg-state" style="color:#f80; float:right; font-weight:bold;">IN ATTESA</span>
 `;
 document.body.appendChild(debugDiv);
 
 const dbg = {
     frame: 0,
-    update(pose, face) {
+    updateFrame() {
         this.frame++;
-        document.getElementById('dbg-pose').textContent  = pose  ? `✅ ${pose} pts`  : '❌ non rilevata';
-        document.getElementById('dbg-face').textContent  = face  ? `✅ ${face} pts`  : '❌ non rilevata';
         document.getElementById('dbg-frame').textContent = this.frame;
+    },
+    updateParts(state) {
+        const setSpan = (id, isActive) => {
+            const el = document.getElementById(id);
+            if (el) {
+                el.textContent = isActive ? '✅ OK' : '❌ NO';
+                el.style.color = isActive ? '#0f0' : '#888';
+            }
+        };
+        setSpan('dbg-testa', state.testa);
+        setSpan('dbg-corpo', state.corpo);
+        setSpan('dbg-armsx', state.braccioSx);
+        setSpan('dbg-armdx', state.braccioDx);
+        setSpan('dbg-legsx', state.gambaSx);
+        setSpan('dbg-legdx', state.gambaDx);
     },
     setKali(ok) {
         const el = document.getElementById('dbg-kali');
-        if (el) { el.textContent = ok ? '✅' : '❌ null'; el.style.color = ok ? '#0f0' : '#f00'; }
+        if (el) { el.textContent = ok ? '✅' : '❌'; el.style.color = ok ? '#0f0' : '#f00'; }
     },
     setBones(n) {
-        document.getElementById('dbg-bones').textContent = n;
-        document.getElementById('dbg-bones').style.color = n > 0 ? '#0f0' : '#f00';
+        const el = document.getElementById('dbg-bones');
+        el.textContent = n;
+        el.style.color = n > 0 ? '#0f0' : '#f00';
     },
     setState(text, color = '#0f0') {
         const el = document.getElementById('dbg-state');
@@ -267,7 +286,6 @@ const setupRig = (loadedModel) => {
                     .trim();
                 
                 skeleton[name] = bone;
-                // Salvataggio essenziale della rest pose
                 boneRestQuats[name] = bone.quaternion.clone(); 
                 boneCount++;
             });
@@ -275,10 +293,10 @@ const setupRig = (loadedModel) => {
     });
 
     dbg.setBones(boneCount);
-    UI.log(`Rig OK — ${boneCount} ossa trovate e Rest Poses salvate.`, 'info');
+    UI.log(`Rig OK — ${boneCount} ossa trovate.`, 'info');
 
     if (boneCount === 0) {
-        UI.log("ERRORE: nessuna osso trovata! Il modello non ha SkinnedMesh riggata.", 'error');
+        UI.log("ERRORE: nessuna osso trovata! Modello non valido.", 'error');
         dbg.setState('NO BONES', '#f00');
     } else {
         UI.log("Premi ▶ Avvia Motion Capture per iniziare.", 'info');
@@ -328,16 +346,11 @@ document.getElementById('file-upload').addEventListener('change', (e) => {
 });
 
 // ==========================================
-// 8. REGISTRAZIONE TARGET
+// 8. LOGICA DI TARGETING E VISIBILITÀ (NEW)
 // ==========================================
 const setBoneTarget = (name, rotation, lerpSpeed = 0.35, inverts = {x:1, y:1, z:1}) => {
     if (!rotation) return;
-    
-    if (
-        !isFinite(rotation.x) || isNaN(rotation.x) ||
-        !isFinite(rotation.y) || isNaN(rotation.y) ||
-        !isFinite(rotation.z) || isNaN(rotation.z)
-    ) return;
+    if (!isFinite(rotation.x) || isNaN(rotation.x)) return;
 
     const bone = findBone(name);
     if (!bone) return;
@@ -349,97 +362,101 @@ const setBoneTarget = (name, rotation, lerpSpeed = 0.35, inverts = {x:1, y:1, z:
     try {
         const euler = new THREE.Euler(rx, ry, rz, 'XYZ');
         const deltaQuat = new THREE.Quaternion().setFromEuler(euler);
-        
-        // Moltiplichiamo il delta calcolato per il bind pose originale
         const restQuat = boneRestQuats[name] || new THREE.Quaternion();
         const targetQuat = restQuat.clone().multiply(deltaQuat);
 
         boneTargets[name] = { bone: bone, target: targetQuat, lerp: lerpSpeed };
-    } catch (e) {
-        // Fallimento silente
-    }
+    } catch (e) {}
 };
 
-// Soglia di visibilità abbassata per evitare blocchi innaturali via webcam
-const checkVis = (landmarks, index, minConfidence = 0.15) => {
+// Funzione Helper: Ritorna true solo se TUTTI gli indici chiave richiesti 
+// hanno una visibilità superiore alla soglia di confidenza.
+const isPartVisible = (landmarks, indices, minConf = 0.35) => {
     if (!landmarks) return false;
-    return landmarks[index] && landmarks[index].visibility > minConfidence;
+    return indices.every(i => landmarks[i] && landmarks[i].visibility > minConf);
 };
 
 // ==========================================
-// 9. CALLBACK MEDIAPIPE
+// 9. CALLBACK MEDIAPIPE (TRACKING MODULARE)
 // ==========================================
 const videoElement = document.getElementById('input_video');
 
 const onResults = (results) => {
-    const hasPose = results.poseLandmarks ? results.poseLandmarks.length : 0;
-    const hasFace = results.faceLandmarks ? results.faceLandmarks.length : 0;
-    dbg.update(hasPose, hasFace);
-
+    dbg.updateFrame();
     if (!mocapActive || !model) return;
 
-    // IL FIX CRITICO: Ripristinato il fallback ea/za per le versioni minificate
+    const poseLms = results.poseLandmarks;
+    const faceLms = results.faceLandmarks;
     const worldLandmarks = results.poseWorldLandmarks || results.ea || results.za || null;
 
-    // --- LAYER POSE (CORPO E ARTI) ---
-    if (results.poseLandmarks && worldLandmarks) {
+    // --- 1. VALUTAZIONE DEGLI STATI (Cosa vede realmente la telecamera?) ---
+    const trackingState = {
+        testa: !!faceLms,
+        // Corpo: spalle (11, 12)
+        corpo: isPartVisible(poseLms, [11, 12]), 
+        // Braccio SX: gomito (13) e polso (15)
+        braccioSx: isPartVisible(poseLms, [13, 15]), 
+        // Braccio DX: gomito (14) e polso (16)
+        braccioDx: isPartVisible(poseLms, [14, 16]), 
+        // Gamba SX: ginocchio (25) e caviglia (27)
+        gambaSx: isPartVisible(poseLms, [25, 27]), 
+        // Gamba DX: ginocchio (26) e caviglia (28)
+        gambaDx: isPartVisible(poseLms, [26, 28])
+    };
+
+    // Aggiorna il pannello a schermo
+    dbg.updateParts(trackingState);
+
+    // --- 2. LAYER POSE (Applica le rotazioni SOLO se la parte è tracciata) ---
+    if (poseLms && worldLandmarks) {
         try {
             const rp = Kalidokit.Pose.solve(
-                worldLandmarks,
-                results.poseLandmarks,
-                { runtime: "mediapipe", video: videoElement }
+                worldLandmarks, poseLms, { runtime: "mediapipe", video: videoElement }
             );
 
             dbg.setKali(!!rp);
 
             if (rp) {
-                // Modificatori per normalizzare il rig Mixamo
                 const mixamoAxisFix = { x: 1, y: -1, z: -1 }; 
 
-                if (rp.Hips && rp.Hips.rotation) {
-                    setBoneTarget("hips", rp.Hips.rotation, 0.3, mixamoAxisFix);
-                }
-
-                if (rp.Spine) {
-                    setBoneTarget("spine", rp.Spine, 0.3, mixamoAxisFix);
+                if (trackingState.corpo) {
+                    if (rp.Hips) setBoneTarget("hips", rp.Hips.rotation, 0.3, mixamoAxisFix);
+                    if (rp.Spine) setBoneTarget("spine", rp.Spine, 0.3, mixamoAxisFix);
                 }
                 
-                // Braccia con filtro visibilità permissivo
-                if (rp.RightUpperArm && checkVis(results.poseLandmarks, 14)) 
+                if (trackingState.braccioDx) {
                     setBoneTarget("rightupperarm", rp.RightUpperArm, 0.35, mixamoAxisFix);
-                if (rp.RightLowerArm && checkVis(results.poseLandmarks, 16)) 
                     setBoneTarget("rightforearm",  rp.RightLowerArm, 0.35, mixamoAxisFix);
-
-                if (rp.LeftUpperArm && checkVis(results.poseLandmarks, 13))  
-                    setBoneTarget("leftupperarm",  rp.LeftUpperArm,  0.35, mixamoAxisFix);
-                if (rp.LeftLowerArm && checkVis(results.poseLandmarks, 15))  
-                    setBoneTarget("leftforearm",   rp.LeftLowerArm,  0.35, mixamoAxisFix);
-
-                if (rp.RightHand && checkVis(results.poseLandmarks, 16)) 
                     setBoneTarget("righthand", rp.RightHand, 0.35, mixamoAxisFix);
-                if (rp.LeftHand && checkVis(results.poseLandmarks, 15))  
+                }
+
+                if (trackingState.braccioSx) {
+                    setBoneTarget("leftupperarm",  rp.LeftUpperArm,  0.35, mixamoAxisFix);
+                    setBoneTarget("leftforearm",   rp.LeftLowerArm,  0.35, mixamoAxisFix);
                     setBoneTarget("lefthand",  rp.LeftHand,  0.35, mixamoAxisFix);
+                }
 
-                // Gambe
-                if (rp.RightUpperLeg && checkVis(results.poseLandmarks, 26)) 
+                if (trackingState.gambaDx) {
                     setBoneTarget("rightupperleg", rp.RightUpperLeg, 0.3, mixamoAxisFix);
-                if (rp.RightLowerLeg && checkVis(results.poseLandmarks, 28)) 
                     setBoneTarget("rightlowerleg", rp.RightLowerLeg, 0.3, mixamoAxisFix);
+                }
 
-                if (rp.LeftUpperLeg && checkVis(results.poseLandmarks, 25))  
+                if (trackingState.gambaSx) {
                     setBoneTarget("leftupperleg",  rp.LeftUpperLeg,  0.3, mixamoAxisFix);
-                if (rp.LeftLowerLeg && checkVis(results.poseLandmarks, 27))  
                     setBoneTarget("leftlowerleg",  rp.LeftLowerLeg,  0.3, mixamoAxisFix);
+                }
             }
         } catch (error) {
             console.warn("[Pose solve error]", error);
         }
+    } else {
+        dbg.setKali(false);
     }
 
-    // --- LAYER FACE (TESTA E COLLO) ---
-    if (results.faceLandmarks) {
+    // --- 3. LAYER FACE ---
+    if (trackingState.testa) {
         try {
-            const rf = Kalidokit.Face.solve(results.faceLandmarks, {
+            const rf = Kalidokit.Face.solve(faceLms, {
                 runtime: "mediapipe", video: videoElement
             });
 
