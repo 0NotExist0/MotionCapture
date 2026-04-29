@@ -5,7 +5,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import * as Kalidokit from 'kalidokit';
 
 // ==========================================
-// 1. UI & LOG MANAGER (Il nostro Canvas Debugger)
+// 1. UI & LOG MANAGER
 // ==========================================
 const UI = {
     overlay: document.getElementById('loading-overlay'),
@@ -30,14 +30,11 @@ const UI = {
     log(message, level = 'info') {
         const line = document.createElement('div');
         line.className = `log-${level}`;
-        // Aggiungiamo un timestamp come in Unity Console
         const time = new Date().toLocaleTimeString();
         line.innerText = `[${time}] ${message}`;
         this.logBox.appendChild(line);
-        // Auto-scroll verso il basso
         this.logBox.scrollTop = this.logBox.scrollHeight;
         
-        // Mantiene anche il log nella console nativa del browser (F12)
         if(level === 'error') console.error(message);
         else if(level === 'warn') console.warn(message);
         else console.log(message);
@@ -137,7 +134,7 @@ document.getElementById('file-upload').addEventListener('change', (e) => {
     };
     
     reader.onload = (event) => {
-        UI.log("File caricato in memoria (ArrayBuffer). Inizio Parsing...", 'info');
+        UI.log("File caricato in memoria. Inizio Parsing...", 'info');
         UI.updateProgress(100);
         
         setTimeout(() => {
@@ -157,20 +154,15 @@ document.getElementById('file-upload').addEventListener('change', (e) => {
                     });
                     
                 } else if (extension === 'fbx') {
-                    UI.log("Avvio FBXLoader. Questa operazione può richiedere tempo...", 'warn');
+                    UI.log("Avvio FBXLoader. Attendere...", 'warn');
                     const loader = new FBXLoader();
                     const fbxModel = loader.parse(contents);
-                    UI.log("FBX Parsato con successo. Applico correzione scala 0.01.", 'info');
+                    UI.log("FBX Parsato con successo.", 'info');
                     fbxModel.scale.set(0.01, 0.01, 0.01); 
                     setupRig(fbxModel);
-                } else {
-                    UI.log(`Formato non supportato: ${extension}`, 'error');
-                    alert("Formato non supportato.");
-                    UI.hideLoading();
                 }
             } catch (err) {
-                UI.log(`Eccezione Critica durante il parsing: ${err.message}`, 'error');
-                alert("Errore critico durante il caricamento del file.");
+                UI.log(`Eccezione Critica: ${err.message}`, 'error');
                 UI.hideLoading();
             }
         }, 100); 
@@ -180,7 +172,7 @@ document.getElementById('file-upload').addEventListener('change', (e) => {
 });
 
 // ==========================================
-// 4. IK SOLVER
+// 4. IK SOLVER (AVATAR MASKING)
 // ==========================================
 const rigBone = (name, rotation, lerp = 0.3) => {
     const bone = skeleton[name.toLowerCase()];
@@ -195,27 +187,51 @@ const rigBone = (name, rotation, lerp = 0.3) => {
 const videoElement = document.getElementById('input_video');
 
 const onResults = (results) => {
-    if (!model || !results.poseLandmarks) return;
+    if (!model) return;
 
-    const riggedPose = Kalidokit.Pose.solve(results.poseWorldLandmarks, results.poseLandmarks, {
-        runtime: "mediapipe",
-        video: videoElement,
-    });
+    // --- LAYER 1: ISOLAMENTO CORPO ---
+    // Questo tracker si basa sulla posizione delle spalle e del bacino.
+    if (results.poseLandmarks) {
+        const riggedPose = Kalidokit.Pose.solve(results.poseWorldLandmarks, results.poseLandmarks, {
+            runtime: "mediapipe",
+            video: videoElement,
+        });
 
-    if (riggedPose) {
-        rigBone("hips", riggedPose.Hips.rotation, 0.1);
-        rigBone("spine", riggedPose.Spine.rotation);
-        rigBone("neck", riggedPose.Neck.rotation);
-        
-        rigBone("rightupperarm", riggedPose.RightUpperArm.rotation);
-        rigBone("rightforearm", riggedPose.RightLowerArm.rotation);
-        rigBone("leftupperarm", riggedPose.LeftUpperArm.rotation);
-        rigBone("leftforearm", riggedPose.LeftLowerArm.rotation);
+        if (riggedPose) {
+            // Nota: Abbiamo Rimosso il Neck da qui!
+            rigBone("hips", riggedPose.Hips.rotation, 0.1);
+            rigBone("spine", riggedPose.Spine.rotation);
+            rigBone("rightupperarm", riggedPose.RightUpperArm.rotation);
+            rigBone("rightforearm", riggedPose.RightLowerArm.rotation);
+            rigBone("leftupperarm", riggedPose.LeftUpperArm.rotation);
+            rigBone("leftforearm", riggedPose.LeftLowerArm.rotation);
+        }
+    }
+
+    // --- LAYER 2: ISOLAMENTO TESTA/VISO ---
+    // Questo tracker si basa su una rete neurale ad alta densità (FaceMesh)
+    // che rileva i micromovimenti indipendentemente dal resto del corpo.
+    if (results.faceLandmarks) {
+        const riggedFace = Kalidokit.Face.solve(results.faceLandmarks, {
+            runtime: "mediapipe",
+            video: videoElement
+        });
+
+        if (riggedFace) {
+            // riggedFace.head ci restituisce le rotazioni X, Y, Z della testa
+            const headRot = riggedFace.head;
+            
+            // Distribuiamo la rotazione al 50% sul collo e 50% sulla testa.
+            // In Unity lo faresti con i pesi delle ossa, qui dimezziamo i radianti.
+            // Questo evita l'effetto "collo spezzato" tipico del Mocap a osso singolo.
+            rigBone("neck", { x: headRot.x * 0.5, y: headRot.y * 0.5, z: headRot.z * 0.5 }, 0.5);
+            rigBone("head", { x: headRot.x * 0.5, y: headRot.y * 0.5, z: headRot.z * 0.5 }, 0.5);
+        }
     }
 };
 
 // ==========================================
-// 5. INIZIALIZZAZIONE MEDIAPIPE E WEBCAM
+// 5. INIZIALIZZAZIONE MEDIAPIPE
 // ==========================================
 UI.showLoading("Download Modelli IA MediaPipe...", 10);
 UI.log("Connessione ai CDN di jsdelivr per Holistic...", 'info');
@@ -223,7 +239,6 @@ UI.log("Connessione ai CDN di jsdelivr per Holistic...", 'info');
 try {
     const holistic = new window.Holistic({
         locateFile: (file) => {
-            UI.log(`Richiesta file remoto: ${file}`, 'info');
             return `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`;
         }
     });
@@ -236,31 +251,25 @@ try {
     });
     holistic.onResults(onResults);
 
-    UI.log("Configurazione fotocamera in corso (Accetta i permessi nel browser)...", 'warn');
     const cameraUtils = new window.Camera(videoElement, {
         onFrame: async () => { await holistic.send({image: videoElement}); },
         width: 640, height: 480
     });
     
     cameraUtils.start().then(() => {
-        UI.log("Webcam avviata con successo. Avvio elaborazione WebAssembly...", 'info');
+        UI.log("Webcam avviata. Sistema Ready.", 'info');
         UI.updateProgress(100);
         UI.setTrackerReady();
-        
-        setTimeout(() => {
-            UI.hideLoading();
-        }, 800);
-        
+        setTimeout(() => UI.hideLoading(), 800);
     }).catch(err => {
-        UI.log(`Errore avvio fotocamera: ${err.message}`, 'error');
+        UI.log(`Errore fotocamera: ${err.message}`, 'error');
         document.getElementById('loading-text').innerText = "Accesso alla Fotocamera Negato.";
     });
 } catch (e) {
-    UI.log(`Errore fatale inizializzazione MediaPipe: ${e.message}`, 'error');
-    document.getElementById('loading-text').innerText = "Errore di Inizializzazione.";
+    UI.log(`Errore inizializzazione: ${e.message}`, 'error');
 }
 
-// Main Update Loop
+// Render Loop Principale
 function animate() {
     requestAnimationFrame(animate);
     renderer.render(scene, camera);
