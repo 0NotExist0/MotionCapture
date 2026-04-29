@@ -1,0 +1,25 @@
+/* Stile base per la scena a schermo intero */
+body { 
+    margin: 0; 
+    overflow: hidden; 
+    background-color: #222; 
+}
+
+/* Stile per il riquadro della webcam */
+#video-container { 
+    position: absolute; 
+    top: 20px; 
+    left: 20px; 
+    width: 320px; 
+    z-index: 10; 
+    border: 2px solid #555; 
+    border-radius: 8px; 
+    overflow: hidden;
+}
+
+/* Adatta il video al contenitore e applica l'effetto specchio */
+video { 
+    width: 100%; 
+    display: block; 
+    transform: scaleX(-1); 
+}
