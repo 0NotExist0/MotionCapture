@@ -548,3 +548,181 @@ try {
     controls.update();
     renderer.render(scene, camera);
 })();
+
+// ==========================================
+// 12. GESTIONE SALVATAGGIO E CARICAMENTO POSE
+// ==========================================
+const PoseManager = {
+    /**
+     * Salva la posa attuale del modello in un file JSON
+     * @param {string} baseName Nome di base per il file esportato
+     */
+    saveCurrentPose(baseName = "MocapPose") {
+        if (!model || Object.keys(skeleton).length === 0) {
+            UI.log("Errore: Nessun modello caricato. Impossibile salvare la posa.", "error");
+            return;
+        }
+
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const poseData = {
+            name: `${baseName}_${timestamp}`,
+            bones: {}
+        };
+
+        // Iteriamo su tutte le ossa mappate nell'oggetto skeleton
+        for (const [boneName, bone] of Object.entries(skeleton)) {
+            // Salviamo la posizione e la rotazione (Quaternione) locale dell'osso
+            poseData.bones[boneName] = {
+                position: {
+                    x: bone.position.x,
+                    y: bone.position.y,
+                    z: bone.position.z
+                },
+                quaternion: {
+                    x: bone.quaternion.x,
+                    y: bone.quaternion.y,
+                    z: bone.quaternion.z,
+                    w: bone.quaternion.w
+                }
+            };
+        }
+
+        // Serializzazione in JSON
+        const jsonString = JSON.stringify(poseData, null, 2);
+        const blob = new Blob([jsonString], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+
+        // Creazione e trigger automatico del link di download
+        const downloadLink = document.createElement('a');
+        downloadLink.href = url;
+        downloadLink.download = `${poseData.name}.json`;
+        document.body.appendChild(downloadLink);
+        downloadLink.click();
+        
+        // Pulizia
+        document.body.removeChild(downloadLink);
+        URL.revokeObjectURL(url);
+
+        UI.log(`📸 Posa salvata con successo: ${poseData.name}.json`, "info");
+    },
+
+    /**
+     * Carica una posa da un file JSON e la applica al modello
+     * @param {string} jsonData Il contenuto testo del file JSON
+     */
+    loadPose(jsonData) {
+        if (!model || Object.keys(skeleton).length === 0) {
+            UI.log("Errore: Nessun modello caricato su cui applicare la posa.", "error");
+            return;
+        }
+
+        try {
+            const poseData = JSON.parse(jsonData);
+            
+            // Per disabilitare temporaneamente il tracking se attivo
+            const wasMocapActive = mocapActive;
+            if (wasMocapActive) {
+                document.getElementById('mocap-btn').click(); // Ferma il mocap
+            }
+
+            for (const [boneName, transform] of Object.entries(poseData.bones)) {
+                const bone = skeleton[boneName];
+                if (bone) {
+                    // Ripristina la posizione locale
+                    bone.position.set(
+                        transform.position.x,
+                        transform.position.y,
+                        transform.position.z
+                    );
+                    
+                    // Ripristina la rotazione locale
+                    bone.quaternion.set(
+                        transform.quaternion.x,
+                        transform.quaternion.y,
+                        transform.quaternion.z,
+                        transform.quaternion.w
+                    );
+                }
+            }
+
+            // Svuota i target del lerp per evitare che l'animator loop sovrascriva la posa statica
+            for (let key in boneTargets) {
+                delete boneTargets[key];
+            }
+
+            UI.log(`📂 Posa caricata e applicata: ${poseData.name}`, "info");
+
+        } catch (error) {
+            UI.log(`Errore nella lettura del file JSON della posa.`, "error");
+            console.error("Pose Parse Error:", error);
+        }
+    }
+};
+
+// ==========================================
+// 13. UI PER SALVATAGGIO POSE
+// ==========================================
+const injectPoseControls = () => {
+    const controlsContainer = document.createElement('div');
+    controlsContainer.style.cssText = 'margin-top: 10px; display: flex; gap: 8px; justify-content: space-between;';
+
+    // Pulsante di Salvataggio
+    const saveBtn = document.createElement('button');
+    saveBtn.innerText = '📸 Salva Frame';
+    saveBtn.style.cssText = `
+        flex: 1; padding: 10px; background: #2b5c8f; color: #fff;
+        border: 2px solid #1a3f66; border-radius: 6px; font-weight: bold;
+        cursor: pointer; transition: 0.2s;
+    `;
+    saveBtn.onmouseover = () => saveBtn.style.background = '#3c72ab';
+    saveBtn.onmouseleave = () => saveBtn.style.background = '#2b5c8f';
+    saveBtn.addEventListener('click', () => PoseManager.saveCurrentPose("CustomPose"));
+
+    // Input File Nascosto per il caricamento
+    const fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.accept = '.json';
+    fileInput.style.display = 'none';
+    fileInput.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (event) => PoseManager.loadPose(event.target.result);
+        reader.readAsText(file);
+        fileInput.value = ''; // Reset per ricaricare lo stesso file se necessario
+    });
+
+    // Pulsante di Caricamento
+    const loadBtn = document.createElement('button');
+    loadBtn.innerText = '📂 Carica Posa';
+    loadBtn.style.cssText = `
+        flex: 1; padding: 10px; background: #8f6a2b; color: #fff;
+        border: 2px solid #664a1a; border-radius: 6px; font-weight: bold;
+        cursor: pointer; transition: 0.2s;
+    `;
+    loadBtn.onmouseover = () => loadBtn.style.background = '#a87f38';
+    loadBtn.onmouseleave = () => loadBtn.style.background = '#8f6a2b';
+    loadBtn.addEventListener('click', () => fileInput.click());
+
+    controlsContainer.appendChild(saveBtn);
+    controlsContainer.appendChild(loadBtn);
+    controlsContainer.appendChild(fileInput);
+
+    // Cerchiamo il contenitore del bottone del Mocap creato nello step 3 per affiancarli
+    const mocapBtnWrapper = document.getElementById('mocap-btn')?.parentElement;
+    
+    if (mocapBtnWrapper) {
+        mocapBtnWrapper.appendChild(controlsContainer);
+    } else {
+        // Fallback se l'UI non è stata ancora renderizzata correttamente
+        controlsContainer.style.cssText += 'position: fixed; top: 70px; left: 16px; z-index: 9998; width: 200px;';
+        document.body.appendChild(controlsContainer);
+    }
+};
+
+// Inietta la UI una volta che il DOM è pronto
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', injectPoseControls);
+} else {
+    setTimeout(injectPoseControls, 100); // Piccolo ritardo per assicurarsi che il bottone mocap sia iniettato
+}
