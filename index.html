@@ -2,8 +2,7 @@
 <html lang="it">
 <head>
     <meta charset="UTF-8">
-    <title>Web Motion Capture con Rig</title>
-    
+    <title>Mixamo Web Mocap - FBX & GLB</title>
     <link rel="stylesheet" href="style.css">
     
     <script type="importmap">
@@ -11,7 +10,6 @@
         "imports": {
             "three": "https://unpkg.com/three@0.150.1/build/three.module.js",
             "three/addons/": "https://unpkg.com/three@0.150.1/examples/jsm/",
-            "@pixiv/three-vrm": "https://unpkg.com/@pixiv/three-vrm@2.0.0/lib/three-vrm.module.js",
             "kalidokit": "https://unpkg.com/kalidokit@1.1.5/dist/kalidokit.es.js"
         }
     }
@@ -21,6 +19,11 @@
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
 </head>
 <body>
+
+    <div id="ui-panel">
+        <input type="file" id="file-upload" accept=".glb,.gltf,.fbx" style="display:none">
+        <button onclick="document.getElementById('file-upload').click()">CARICA MODELLO (GLB o FBX)</button>
+    </div>
 
     <div id="video-container">
         <video id="input_video" autoplay playsinline></video>
