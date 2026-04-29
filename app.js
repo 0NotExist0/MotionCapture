@@ -232,8 +232,13 @@ const findBone = (targetName) => {
 };
 
 // ==========================================
-// 6. SETUP RIG
+// 6. SETUP RIG E MEMORIA ROTAZIONI CONTINUE
 // ==========================================
+// SOLUZIONE "AGGIORNARE CONTINUAMENTE IL MODELLO":
+// Creiamo un registro che conserva i target di rotazione correnti per ogni osso.
+// Il Render Loop slerperà fluidamente verso questi target ad ogni frame.
+const boneTargets = {}; 
+
 const setupRig = (loadedModel) => {
     UI.log("Setup Rig in corso...", 'info');
     if (model) scene.remove(model);
@@ -241,6 +246,9 @@ const setupRig = (loadedModel) => {
     model = loadedModel;
     scene.add(model);
     skeleton = {};
+    
+    // Pulisci vecchi target
+    for (let key in boneTargets) delete boneTargets[key];
 
     const defaultMaterial = new THREE.MeshStandardMaterial({
         color: 0xaaaaaa, roughness: 0.6, metalness: 0.1,
@@ -269,8 +277,6 @@ const setupRig = (loadedModel) => {
 
     dbg.setBones(boneCount);
     UI.log(`Rig OK — ${boneCount} ossa trovate.`, 'info');
-
-    // FIX: stampa le ossa trovate per debug
     UI.log(`Ossa: ${Object.keys(skeleton).join(', ')}`, 'info');
 
     if (boneCount === 0) {
@@ -324,12 +330,14 @@ document.getElementById('file-upload').addEventListener('change', (e) => {
 });
 
 // ==========================================
-// 8. RIG BONE — FIX: ordine Euler esplicito + guard NaN
+// 8. REGISTRAZIONE TARGET (Fix Assi Invertiti)
 // ==========================================
-const rigBone = (name, rotation, lerp = 0.3) => {
+// SOLUZIONE "ASSI AL CONTRARIO":
+// Aggiungiamo un parametro `inverts` per ribaltare Y e Z sui modelli Mixamo.
+const setBoneTarget = (name, rotation, lerpSpeed = 0.15, inverts = {x: 1, y: 1, z: 1}) => {
     if (!rotation) return;
-
-    // FIX 1: scarta valori NaN/Infinity che mandano il bone in stato indeterminato
+    
+    // Filtro salvavita contro i NaN
     if (
         !isFinite(rotation.x) || isNaN(rotation.x) ||
         !isFinite(rotation.y) || isNaN(rotation.y) ||
@@ -339,15 +347,26 @@ const rigBone = (name, rotation, lerp = 0.3) => {
     const bone = findBone(name);
     if (!bone) return;
 
+    // Applichiamo i modificatori degli assi per Mixamo
+    const rx = rotation.x * inverts.x;
+    const ry = rotation.y * inverts.y;
+    const rz = rotation.z * inverts.z;
+
     try {
-        // FIX 2: ordine di rotazione esplicito 'XYZ' — senza questo Three.js
-        // usa un ordine di default che può non corrispondere ai dati di Kalidokit
-        const euler = new THREE.Euler(rotation.x, rotation.y, rotation.z, 'XYZ');
-        const target = new THREE.Quaternion().setFromEuler(euler);
-        bone.quaternion.slerp(target, lerp);
+        const euler = new THREE.Euler(rx, ry, rz, 'XYZ');
+        const targetQuat = new THREE.Quaternion().setFromEuler(euler);
+        
+        // Salviamo il target nel dizionario (sarà il Render Loop a muovere l'osso fisicamente)
+        boneTargets[name] = { bone: bone, target: targetQuat, lerp: lerpSpeed };
     } catch (e) {
         // Fallimento silente
     }
+};
+
+// Funzione Helper per controllare la visibilità e risolvere "IL TRACKING PARZIALE"
+const checkVis = (landmarks, index, minConfidence = 0.5) => {
+    if (!landmarks) return false;
+    return landmarks[index] && landmarks[index].visibility > minConfidence;
 };
 
 // ==========================================
@@ -362,17 +381,9 @@ const onResults = (results) => {
 
     if (!mocapActive || !model) return;
 
-    // -------------------------------------------------------
-    // FIX 3: poseWorldLandmarks può avere nome interno diverso
-    // a seconda della versione di Holistic. Proviamo i fallback.
-    // -------------------------------------------------------
-    const worldLandmarks =
-        results.poseWorldLandmarks ||   // nome standard
-        results.ea ||                    // vecchie build MediaPipe
-        results.za ||                    // build intermedie
-        null;
+    const worldLandmarks = results.poseWorldLandmarks || results.ea || results.za || null;
 
-    // --- LAYER POSE (CORPO INTERO) ---
+    // --- LAYER POSE (CORPO E ARTI) ---
     if (results.poseLandmarks && worldLandmarks) {
         try {
             const rp = Kalidokit.Pose.solve(
@@ -381,43 +392,63 @@ const onResults = (results) => {
                 { runtime: "mediapipe", video: videoElement }
             );
 
-            // FIX 4: debug — mostra se Kalidokit restituisce dati reali
             dbg.setKali(!!rp);
 
             if (rp) {
-                // Hips: ha .rotation come sotto-oggetto {x,y,z}
+                // Modificatore Assi standard per Mixamo: Y invertito, Z invertito.
+                const mixamoAxisFix = { x: 1, y: -1, z: -1 }; 
+
+                // Hips (Bacino)
                 if (rp.Hips && rp.Hips.rotation) {
-                    rigBone("hips", rp.Hips.rotation, 0.1);
+                    setBoneTarget("hips", rp.Hips.rotation, 0.1, mixamoAxisFix);
                 }
 
-                // FIX 5: ogni altro valore è direttamente {x,y,z}
-                // ma alcuni potrebbero arrivare come undefined se il corpo
-                // non è completamente in campo — il guard NaN di rigBone gestisce tutto
+                // Spine (Spina dorsale)
+                if (rp.Spine) {
+                    setBoneTarget("spine", rp.Spine, 0.2, mixamoAxisFix);
+                }
 
-                if (rp.Spine)        rigBone("spine",        rp.Spine,        0.3);
+                // ARTI: Controlliamo che i landmark chiave (gomiti, polsi, ginocchia, caviglie)
+                // siano effettivamente VISIBILI (confidence > 0.4) prima di aggiornare il target.
+                // Se non sono visibili, il target non si aggiorna e l'osso rimane dove si trovava.
+                
+                // Braccio Destro (Gomito = 14, Polso = 16)
+                if (rp.RightUpperArm && checkVis(results.poseLandmarks, 14, 0.4)) 
+                    setBoneTarget("rightupperarm", rp.RightUpperArm, 0.2, mixamoAxisFix);
+                if (rp.RightLowerArm && checkVis(results.poseLandmarks, 16, 0.4)) 
+                    setBoneTarget("rightforearm",  rp.RightLowerArm, 0.2, mixamoAxisFix);
 
-                // Braccia
-                if (rp.RightUpperArm) rigBone("rightupperarm", rp.RightUpperArm, 0.3);
-                if (rp.RightLowerArm) rigBone("rightforearm",  rp.RightLowerArm, 0.3);
-                if (rp.LeftUpperArm)  rigBone("leftupperarm",  rp.LeftUpperArm,  0.3);
-                if (rp.LeftLowerArm)  rigBone("leftforearm",   rp.LeftLowerArm,  0.3);
+                // Braccio Sinistro (Gomito = 13, Polso = 15)
+                if (rp.LeftUpperArm && checkVis(results.poseLandmarks, 13, 0.4))  
+                    setBoneTarget("leftupperarm",  rp.LeftUpperArm,  0.2, mixamoAxisFix);
+                if (rp.LeftLowerArm && checkVis(results.poseLandmarks, 15, 0.4))  
+                    setBoneTarget("leftforearm",   rp.LeftLowerArm,  0.2, mixamoAxisFix);
 
                 // Mani
-                if (rp.RightHand) rigBone("righthand", rp.RightHand, 0.3);
-                if (rp.LeftHand)  rigBone("lefthand",  rp.LeftHand,  0.3);
+                if (rp.RightHand && checkVis(results.poseLandmarks, 16, 0.4)) 
+                    setBoneTarget("righthand", rp.RightHand, 0.3, mixamoAxisFix);
+                if (rp.LeftHand && checkVis(results.poseLandmarks, 15, 0.4))  
+                    setBoneTarget("lefthand",  rp.LeftHand,  0.3, mixamoAxisFix);
 
-                // Gambe
-                if (rp.RightUpperLeg) rigBone("rightupperleg", rp.RightUpperLeg, 0.3);
-                if (rp.RightLowerLeg) rigBone("rightlowerleg", rp.RightLowerLeg, 0.3);
-                if (rp.LeftUpperLeg)  rigBone("leftupperleg",  rp.LeftUpperLeg,  0.3);
-                if (rp.LeftLowerLeg)  rigBone("leftlowerleg",  rp.LeftLowerLeg,  0.3);
+                // Gamba Destra (Ginocchio = 26, Caviglia = 28)
+                if (rp.RightUpperLeg && checkVis(results.poseLandmarks, 26, 0.4)) 
+                    setBoneTarget("rightupperleg", rp.RightUpperLeg, 0.2, mixamoAxisFix);
+                if (rp.RightLowerLeg && checkVis(results.poseLandmarks, 28, 0.4)) 
+                    setBoneTarget("rightlowerleg", rp.RightLowerLeg, 0.2, mixamoAxisFix);
+
+                // Gamba Sinistra (Ginocchio = 25, Caviglia = 27)
+                if (rp.LeftUpperLeg && checkVis(results.poseLandmarks, 25, 0.4))  
+                    setBoneTarget("leftupperleg",  rp.LeftUpperLeg,  0.2, mixamoAxisFix);
+                if (rp.LeftLowerLeg && checkVis(results.poseLandmarks, 27, 0.4))  
+                    setBoneTarget("leftlowerleg",  rp.LeftLowerLeg,  0.2, mixamoAxisFix);
             }
         } catch (error) {
             console.warn("[Pose solve error]", error);
         }
     }
 
-    // --- LAYER FACE ---
+    // --- LAYER FACE (TESTA E COLLO) ---
+    // La faccia è quasi sempre visibile indipendentemente dal corpo
     if (results.faceLandmarks) {
         try {
             const rf = Kalidokit.Face.solve(results.faceLandmarks, {
@@ -426,25 +457,19 @@ const onResults = (results) => {
 
             if (rf && rf.head) {
                 const h = rf.head;
-                rigBone("neck", { x: -h.x * 0.5, y: h.y * 0.5, z: -h.z * 0.5 }, 0.5);
-                rigBone("head", { x: -h.x * 0.5, y: h.y * 0.5, z: -h.z * 0.5 }, 0.5);
+                // La testa in Kalidokit necessita di una mappatura assi specifica
+                const headRot = { x: -h.x * 0.5, y: h.y * 0.5, z: -h.z * 0.5 };
+                setBoneTarget("neck", headRot, 0.3); // Nessun inversione Mixamo extra qui
+                setBoneTarget("head", headRot, 0.3);
             }
         } catch (error) {
             console.warn("[Face solve error]", error);
         }
     }
-
-    // FIX 6: aggiorna la matrice mondiale del modello ogni frame,
-    // altrimenti le posizioni delle ossa non vengono propagate visivamente
-    if (model) {
-        model.updateMatrixWorld(true);
-    }
 };
 
 // ==========================================
 // 10. MEDIAPIPE INIT
-// FIX 7: soglie abbassate a 0.3 per rilevare corpo parzialmente visibile
-// FIX 8: enableSegmentation: false riduce il carico e migliora il framerate
 // ==========================================
 UI.showLoading("Download Modelli IA MediaPipe...", 10);
 
@@ -456,21 +481,15 @@ try {
     holistic.setOptions({
         modelComplexity: 1,
         smoothLandmarks: true,
-        enableSegmentation: false,          // FIX: disabilitato — non serve, libera risorse
+        enableSegmentation: false, 
         smoothSegmentation: false,
-        // FIX: soglie più basse = rilevamento più robusto
-        // anche con corpo parzialmente in campo o in movimento veloce
         minDetectionConfidence: 0.3,
         minTrackingConfidence: 0.3,
-        refineFaceLandmarks: false,         // FIX: non serve per la testa, riduce latenza
+        refineFaceLandmarks: false,
     });
 
     holistic.onResults(onResults);
 
-    // FIX 9: la Camera di MediaPipe già chiama onFrame ad ogni frame del video;
-    // non serve nessun loop manuale aggiuntivo — ma è importante che
-    // holistic.send() venga chiamato OGNI frame senza salti.
-    // Il codice originale era già corretto su questo punto.
     new window.Camera(videoElement, {
         onFrame: async () => {
             await holistic.send({ image: videoElement });
@@ -482,7 +501,7 @@ try {
         UI.setTrackerReady();
         setTimeout(() => UI.hideLoading(), 800);
         UI.log("Telecamera pronta. Carica un modello e premi ▶ Avvia.", 'info');
-        UI.log("SUGGERIMENTO: assicurati che braccia e gambe siano visibili in camera.", 'info');
+        UI.log("SUGGERIMENTO: Assicurati che braccia e gambe siano visibili per muoverle.", 'info');
     });
 
 } catch (e) {
@@ -492,12 +511,20 @@ try {
 }
 
 // ==========================================
-// 11. RENDER LOOP
-// FIX 10: aggiunta updateMatrixWorld nel render loop
-// come sicurezza aggiuntiva anche quando mocap è inattivo
+// 11. RENDER LOOP (Animazione Continua Fluida)
 // ==========================================
 (function animate() {
     requestAnimationFrame(animate);
+    
+    // Aggiorniamo gradualmente la rotazione verso i target attivi (Slerp).
+    // Questo è il cuore dell'aggiornamento continuo scorporato dal framerate della camera.
+    if (mocapActive && model) {
+        for (const key in boneTargets) {
+            const data = boneTargets[key];
+            data.bone.quaternion.slerp(data.target, data.lerp);
+        }
+    }
+
     if (model) model.updateMatrixWorld(true);
     controls.update();
     renderer.render(scene, camera);
