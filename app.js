@@ -563,13 +563,18 @@ try {
     requestAnimationFrame(animate);
     
     if (mocapActive && model) {
+        // Applica le rotazioni target con interpolazione
         for (const key in boneTargets) {
             const data = boneTargets[key];
-            data.bone.quaternion.slerp(data.target, data.lerp);
+            if (data.bone && data.target) {
+                data.bone.quaternion.slerp(data.target, data.lerp);
+            }
         }
+        
+        // IMPORTANTE: aggiorna la matrice world del modello e dello scheletro
+        model.updateMatrixWorld(true);
     }
 
-    if (model) model.updateMatrixWorld(true);
     controls.update();
     renderer.render(scene, camera);
 })();
