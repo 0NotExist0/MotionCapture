@@ -251,7 +251,7 @@ const findBone = (targetName) => {
 };
 
 // ==========================================
-// 6. SETUP RIG E MEMORIA ROTAZIONI CONTINUE
+// 6. SETUP RIG E MEMORIA ROTAZIONI
 // ==========================================
 const boneTargets = {}; 
 const boneRestQuats = {};
@@ -346,38 +346,39 @@ document.getElementById('file-upload').addEventListener('change', (e) => {
 });
 
 // ==========================================
-// 8. LOGICA DI TARGETING E VISIBILITÀ (NEW)
+// 8. LOGICA DI TARGETING AVANZATA (PARENT SPACE FIX)
 // ==========================================
-const setBoneTarget = (name, rotation, lerpSpeed = 0.35, inverts = {x:1, y:1, z:1}) => {
+const setBoneTarget = (name, rotation, lerpSpeed = 0.35) => {
     if (!rotation) return;
     if (!isFinite(rotation.x) || isNaN(rotation.x)) return;
 
     const bone = findBone(name);
     if (!bone) return;
 
-    const rx = rotation.x * inverts.x;
-    const ry = rotation.y * inverts.y;
-    const rz = rotation.z * inverts.z;
-
     try {
-        const euler = new THREE.Euler(rx, ry, rz, 'XYZ');
+        // Kalidokit genera rotazioni (in radianti) basate sullo standard VRM.
+        const euler = new THREE.Euler(rotation.x, rotation.y, rotation.z, 'XYZ');
         const deltaQuat = new THREE.Quaternion().setFromEuler(euler);
         const restQuat = boneRestQuats[name] || new THREE.Quaternion();
-        const targetQuat = restQuat.clone().multiply(deltaQuat);
+
+        // FIX DA ESPERTO: Pre-moltiplicazione (deltaQuat * restQuat).
+        // Questo applica la rotazione catturata dalla IA nello spazio del GENITORE dell'osso
+        // (es. la spalla) e NON nell'asse locale distorto della T-Pose di Mixamo.
+        const targetQuat = new THREE.Quaternion()
+            .copy(deltaQuat)
+            .multiply(restQuat);
 
         boneTargets[name] = { bone: bone, target: targetQuat, lerp: lerpSpeed };
     } catch (e) {}
 };
 
-// Funzione Helper: Ritorna true solo se TUTTI gli indici chiave richiesti 
-// hanno una visibilità superiore alla soglia di confidenza.
 const isPartVisible = (landmarks, indices, minConf = 0.35) => {
     if (!landmarks) return false;
     return indices.every(i => landmarks[i] && landmarks[i].visibility > minConf);
 };
 
 // ==========================================
-// 9. CALLBACK MEDIAPIPE (TRACKING MODULARE)
+// 9. CALLBACK MEDIAPIPE
 // ==========================================
 const videoElement = document.getElementById('input_video');
 
@@ -389,25 +390,18 @@ const onResults = (results) => {
     const faceLms = results.faceLandmarks;
     const worldLandmarks = results.poseWorldLandmarks || results.ea || results.za || null;
 
-    // --- 1. VALUTAZIONE DEGLI STATI (Cosa vede realmente la telecamera?) ---
     const trackingState = {
         testa: !!faceLms,
-        // Corpo: spalle (11, 12)
         corpo: isPartVisible(poseLms, [11, 12]), 
-        // Braccio SX: gomito (13) e polso (15)
         braccioSx: isPartVisible(poseLms, [13, 15]), 
-        // Braccio DX: gomito (14) e polso (16)
         braccioDx: isPartVisible(poseLms, [14, 16]), 
-        // Gamba SX: ginocchio (25) e caviglia (27)
         gambaSx: isPartVisible(poseLms, [25, 27]), 
-        // Gamba DX: ginocchio (26) e caviglia (28)
         gambaDx: isPartVisible(poseLms, [26, 28])
     };
 
-    // Aggiorna il pannello a schermo
     dbg.updateParts(trackingState);
 
-    // --- 2. LAYER POSE (Applica le rotazioni SOLO se la parte è tracciata) ---
+    // --- LAYER POSE ---
     if (poseLms && worldLandmarks) {
         try {
             const rp = Kalidokit.Pose.solve(
@@ -417,33 +411,32 @@ const onResults = (results) => {
             dbg.setKali(!!rp);
 
             if (rp) {
-                const mixamoAxisFix = { x: 1, y: -1, z: -1 }; 
-
+                // Non passiamo più l'axisFix manuale! La matematica risolve il retargeting.
                 if (trackingState.corpo) {
-                    if (rp.Hips) setBoneTarget("hips", rp.Hips.rotation, 0.3, mixamoAxisFix);
-                    if (rp.Spine) setBoneTarget("spine", rp.Spine, 0.3, mixamoAxisFix);
+                    if (rp.Hips) setBoneTarget("hips", rp.Hips.rotation, 0.3);
+                    if (rp.Spine) setBoneTarget("spine", rp.Spine, 0.3);
                 }
                 
                 if (trackingState.braccioDx) {
-                    setBoneTarget("rightupperarm", rp.RightUpperArm, 0.35, mixamoAxisFix);
-                    setBoneTarget("rightforearm",  rp.RightLowerArm, 0.35, mixamoAxisFix);
-                    setBoneTarget("righthand", rp.RightHand, 0.35, mixamoAxisFix);
+                    setBoneTarget("rightupperarm", rp.RightUpperArm, 0.35);
+                    setBoneTarget("rightforearm",  rp.RightLowerArm, 0.35);
+                    setBoneTarget("righthand", rp.RightHand, 0.35);
                 }
 
                 if (trackingState.braccioSx) {
-                    setBoneTarget("leftupperarm",  rp.LeftUpperArm,  0.35, mixamoAxisFix);
-                    setBoneTarget("leftforearm",   rp.LeftLowerArm,  0.35, mixamoAxisFix);
-                    setBoneTarget("lefthand",  rp.LeftHand,  0.35, mixamoAxisFix);
+                    setBoneTarget("leftupperarm",  rp.LeftUpperArm,  0.35);
+                    setBoneTarget("leftforearm",   rp.LeftLowerArm,  0.35);
+                    setBoneTarget("lefthand",  rp.LeftHand,  0.35);
                 }
 
                 if (trackingState.gambaDx) {
-                    setBoneTarget("rightupperleg", rp.RightUpperLeg, 0.3, mixamoAxisFix);
-                    setBoneTarget("rightlowerleg", rp.RightLowerLeg, 0.3, mixamoAxisFix);
+                    setBoneTarget("rightupperleg", rp.RightUpperLeg, 0.3);
+                    setBoneTarget("rightlowerleg", rp.RightLowerLeg, 0.3);
                 }
 
                 if (trackingState.gambaSx) {
-                    setBoneTarget("leftupperleg",  rp.LeftUpperLeg,  0.3, mixamoAxisFix);
-                    setBoneTarget("leftlowerleg",  rp.LeftLowerLeg,  0.3, mixamoAxisFix);
+                    setBoneTarget("leftupperleg",  rp.LeftUpperLeg,  0.3);
+                    setBoneTarget("leftlowerleg",  rp.LeftLowerLeg,  0.3);
                 }
             }
         } catch (error) {
@@ -453,13 +446,15 @@ const onResults = (results) => {
         dbg.setKali(false);
     }
 
-    // --- 3. LAYER FACE ---
+    // --- LAYER FACE ---
     if (trackingState.testa) {
         try {
             const rf = Kalidokit.Face.solve(faceLms, {
                 runtime: "mediapipe", video: videoElement
             });
 
+            // La faccia usa output grezzi specifici che vanno scalati e invertiti
+            // rispetto al Pose solver.
             if (rf && rf.head) {
                 const h = rf.head;
                 const headRot = { x: -h.x * 0.5, y: h.y * 0.5, z: -h.z * 0.5 };
