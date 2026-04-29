@@ -2,7 +2,7 @@
 <html lang="it">
 <head>
     <meta charset="UTF-8">
-    <title>Mixamo Web Mocap - FBX & GLB</title>
+    <title>Web Mocap Studio</title>
     <link rel="stylesheet" href="style.css">
     
     <script type="importmap">
@@ -20,13 +20,40 @@
 </head>
 <body>
 
-    <div id="ui-panel">
-        <input type="file" id="file-upload" accept=".glb,.gltf,.fbx" style="display:none">
-        <button onclick="document.getElementById('file-upload').click()">CARICA MODELLO (GLB o FBX)</button>
+    <div id="loading-overlay">
+        <div class="loader-content">
+            <h2 id="loading-text">Inizializzazione Sistema...</h2>
+            <div id="progress-container">
+                <div id="progress-bar"></div>
+            </div>
+        </div>
     </div>
 
-    <div id="video-container">
-        <video id="input_video" autoplay playsinline></video>
+    <div id="app-container">
+        <div id="sidebar">
+            <div class="header">
+                <h2>MOCAP STUDIO</h2>
+                <p>Status: <span id="status-indicator" class="status-offline">Waiting</span></p>
+            </div>
+            
+            <div class="control-group">
+                <label>Avatar Personalizzato</label>
+                <input type="file" id="file-upload" accept=".glb,.gltf,.fbx" style="display:none">
+                <button class="btn-primary" onclick="document.getElementById('file-upload').click()">
+                    Carica Modello (GLB/FBX)
+                </button>
+                <p class="hint">Richiede scheletro Mixamo standard in T-Pose.</p>
+            </div>
+
+            <div class="camera-preview">
+                <p>Input Telecamera</p>
+                <div id="video-wrapper">
+                    <video id="input_video" autoplay playsinline></video>
+                </div>
+            </div>
+        </div>
+        
+        <div id="viewport"></div>
     </div>
 
     <script type="module" src="app.js"></script>
