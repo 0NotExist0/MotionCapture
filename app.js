@@ -346,30 +346,31 @@ document.getElementById('file-upload').addEventListener('change', (e) => {
 });
 
 // ==========================================
-// 8. LOGICA DI TARGETING CON FALLBACK A T-POSE
+// 8. LOGICA DI TARGETING CON SWIZZLING (SCAMBIO ASSI) E FALLBACK
 // ==========================================
-const setBoneTarget = (name, rotation, lerpSpeed = 0.35, inverts = { x: 1, y: 1, z: 1 }, isActive = true) => {
+const setBoneTarget = (name, rotation, lerpSpeed = 0.35, map = { x: 'x', y: 'y', z: 'z', ix: 1, iy: 1, iz: 1 }, isActive = true) => {
     const bone = findBone(name);
     if (!bone) return;
 
     const restQuat = boneRestQuats[name] || new THREE.Quaternion();
 
-    // RISOLUZIONE GAMBE/BRACCIA IMPAZZITE:
-    // Se la telecamera non vede la parte del corpo, o manca la rotazione,
-    // eseguiamo uno Slerp (Spherical Linear Interpolation) verso la T-Pose originale.
+    // FALLBACK A T-POSE: se perdiamo il tracking, torniamo alla posa base
     if (!isActive || !rotation) {
         boneTargets[name] = { bone: bone, target: restQuat, lerp: lerpSpeed * 0.5 };
         return;
     }
 
     try {
-        const rx = rotation.x * inverts.x;
-        const ry = rotation.y * inverts.y;
-        const rz = rotation.z * inverts.z;
+        // SWIZZLING: Leggiamo l'asse indicato dalla mappa e applichiamo l'eventuale inversione
+        // Es: se map.x = 'z', stiamo prendendo la rotazione Z di Kalidokit e mettendola nella X del modello
+        const rx = rotation[map.x] * map.ix;
+        const ry = rotation[map.y] * map.iy;
+        const rz = rotation[map.z] * map.iz;
 
         const euler = new THREE.Euler(rx, ry, rz, 'XYZ');
         const deltaQuat = new THREE.Quaternion().setFromEuler(euler);
         
+        // Moltiplichiamo per la posa di riposo locale
         const targetQuat = new THREE.Quaternion().copy(restQuat).multiply(deltaQuat);
 
         boneTargets[name] = { bone: bone, target: targetQuat, lerp: lerpSpeed };
@@ -385,7 +386,7 @@ const isPartVisible = (landmarks, indices, minConf = 0.35) => {
 
 
 // ==========================================
-// 9. CALLBACK MEDIAPIPE (MIRRORING E STABILIZZAZIONE)
+// 9. CALLBACK MEDIAPIPE (MAPPATURE ASSI E MIRRORING)
 // ==========================================
 const videoElement = document.getElementById('input_video');
 
@@ -408,13 +409,20 @@ const onResults = (results) => {
 
     dbg.updateParts(trackingState);
 
-    // --- CONFIGURAZIONE ASSI ---
-    const standardFix = { x: 1, y: 1, z: 1 };
+    // --- CONFIGURAZIONE MAPPATURE ASSI (SWIZZLING) ---
+    // Struttura: x, y, z dicono quale asse di Kalidokit leggere. ix, iy, iz sono il segno (1 o -1).
     
-    // RISOLUZIONE BRACCIO ATTRORCIGLIATO:
-    // Rimuoviamo le inversioni aggressive della Y. Quando mappiamo un input speculare
-    // su uno scheletro Mixamo, basta invertire la Z per correggere la flessione del gomito.
-    const armFix = { x: 1, y: 1, z: -1 }; 
+    // Mappatura Standard
+    const standardMap = { x: 'x', y: 'y', z: 'z', ix: 1, iy: 1, iz: 1 };
+    
+    // Mappatura per risolvere la torsione dorsale (Spine)
+    // Se il modello si piega all'indietro quando tu vai in avanti, basta mettere ix: -1
+    const spineMap = { x: 'x', y: 'y', z: 'z', ix: 1, iy: 1, iz: 1 }; 
+
+    // Mappature Braccia: Mixamo spesso richiede che la X e la Z vengano invertite o scambiate
+    // Se vedi che alzando il braccio l'avatar lo ruota in orizzontale, devi provare a scambiare 'x' con 'z'
+    const leftArmMap = { x: 'x', y: 'y', z: 'z', ix: 1, iy: 1, iz: 1 }; 
+    const rightArmMap = { x: 'x', y: 'y', z: 'z', ix: 1, iy: -1, iz: -1 }; 
 
     // --- LAYER POSE ---
     if (poseLms && worldLandmarks) {
@@ -426,29 +434,28 @@ const onResults = (results) => {
             dbg.setKali(!!rp);
 
             if (rp) {
-                // Passiamo sempre lo stato (trackingState) all'ultimo parametro del targeting.
-                // Se è false, il sistema lo ignora e riporta l'osso in T-Pose.
+                // CORPO (Hips & Spine)
+                setBoneTarget("hips", rp.Hips ? rp.Hips.rotation : null, 0.3, spineMap, trackingState.corpo);
+                setBoneTarget("spine", rp.Spine, 0.3, spineMap, trackingState.corpo);
 
-                setBoneTarget("hips", rp.Hips ? rp.Hips.rotation : null, 0.3, standardFix, trackingState.corpo);
-                setBoneTarget("spine", rp.Spine, 0.3, standardFix, trackingState.corpo);
+                // MIRRORING LOGICO INCROCIATO
+                
+                // Input DX (Webcam) -> Braccio SX (Modello 3D)
+                setBoneTarget("leftupperarm",  rp.RightUpperArm, 0.35, leftArmMap, trackingState.braccioDx);
+                setBoneTarget("leftforearm",   rp.RightLowerArm, 0.35, leftArmMap, trackingState.braccioDx);
+                setBoneTarget("lefthand",      rp.RightHand,     0.35, leftArmMap, trackingState.braccioDx);
 
-                // MIRRORING INCROCIATO:
-                // Input DX (MediaPipe) guida il Braccio SX (Modello 3D)
-                setBoneTarget("leftupperarm",  rp.RightUpperArm, 0.35, armFix, trackingState.braccioDx);
-                setBoneTarget("leftforearm",   rp.RightLowerArm, 0.35, armFix, trackingState.braccioDx);
-                setBoneTarget("lefthand",      rp.RightHand,     0.35, armFix, trackingState.braccioDx);
+                // Input SX (Webcam) -> Braccio DX (Modello 3D)
+                setBoneTarget("rightupperarm", rp.LeftUpperArm, 0.35, rightArmMap, trackingState.braccioSx);
+                setBoneTarget("rightforearm",  rp.LeftLowerArm, 0.35, rightArmMap, trackingState.braccioSx);
+                setBoneTarget("righthand",     rp.LeftHand,     0.35, rightArmMap, trackingState.braccioSx);
 
-                // Input SX (MediaPipe) guida il Braccio DX (Modello 3D)
-                setBoneTarget("rightupperarm", rp.LeftUpperArm, 0.35, armFix, trackingState.braccioSx);
-                setBoneTarget("rightforearm",  rp.LeftLowerArm, 0.35, armFix, trackingState.braccioSx);
-                setBoneTarget("righthand",     rp.LeftHand,     0.35, armFix, trackingState.braccioSx);
+                // GAMBE
+                setBoneTarget("leftupperleg", rp.RightUpperLeg, 0.3, standardMap, trackingState.gambaDx);
+                setBoneTarget("leftlowerleg", rp.RightLowerLeg, 0.3, standardMap, trackingState.gambaDx);
 
-                // Gambe (Stessa logica di specchio e stabilizzazione)
-                setBoneTarget("leftupperleg", rp.RightUpperLeg, 0.3, standardFix, trackingState.gambaDx);
-                setBoneTarget("leftlowerleg", rp.RightLowerLeg, 0.3, standardFix, trackingState.gambaDx);
-
-                setBoneTarget("rightupperleg",  rp.LeftUpperLeg,  0.3, standardFix, trackingState.gambaSx);
-                setBoneTarget("rightlowerleg",  rp.LeftLowerLeg,  0.3, standardFix, trackingState.gambaSx);
+                setBoneTarget("rightupperleg",  rp.LeftUpperLeg,  0.3, standardMap, trackingState.gambaSx);
+                setBoneTarget("rightlowerleg",  rp.LeftLowerLeg,  0.3, standardMap, trackingState.gambaSx);
             }
         } catch (error) {
             console.warn("[Pose solve error]", error);
@@ -466,16 +473,16 @@ const onResults = (results) => {
 
             if (rf && rf.head) {
                 const h = rf.head;
+                // La testa usa Eulers standard custom per correggere lo specchio
                 const headRot = { x: -h.x * 0.5, y: -h.y * 0.5, z: h.z * 0.5 };
-                setBoneTarget("neck", headRot, 0.35, standardFix, true);
-                setBoneTarget("head", headRot, 0.35, standardFix, true);
+                setBoneTarget("neck", headRot, 0.35, standardMap, true);
+                setBoneTarget("head", headRot, 0.35, standardMap, true);
             }
         } catch (error) {
             console.warn("[Face solve error]", error);
         }
     }
 };
-
 // ==========================================
 // 10. MEDIAPIPE INIT
 // ==========================================
