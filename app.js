@@ -346,9 +346,9 @@ document.getElementById('file-upload').addEventListener('change', (e) => {
 });
 
 // ==========================================
-// 8. LOGICA DI TARGETING AVANZATA (PARENT SPACE FIX)
+// 8. LOGICA DI TARGETING CON INVERSIONE ASSI
 // ==========================================
-const setBoneTarget = (name, rotation, lerpSpeed = 0.35) => {
+const setBoneTarget = (name, rotation, lerpSpeed = 0.35, inverts = { x: 1, y: 1, z: 1 }) => {
     if (!rotation) return;
     if (!isFinite(rotation.x) || isNaN(rotation.x)) return;
 
@@ -356,17 +356,17 @@ const setBoneTarget = (name, rotation, lerpSpeed = 0.35) => {
     if (!bone) return;
 
     try {
-        // Kalidokit genera rotazioni (in radianti) basate sullo standard VRM.
-        const euler = new THREE.Euler(rotation.x, rotation.y, rotation.z, 'XYZ');
+        // Applichiamo i moltiplicatori per correggere gli assi di Mixamo
+        const rx = rotation.x * inverts.x;
+        const ry = rotation.y * inverts.y;
+        const rz = rotation.z * inverts.z;
+
+        const euler = new THREE.Euler(rx, ry, rz, 'XYZ');
         const deltaQuat = new THREE.Quaternion().setFromEuler(euler);
         const restQuat = boneRestQuats[name] || new THREE.Quaternion();
 
-        // FIX DA ESPERTO: Pre-moltiplicazione (deltaQuat * restQuat).
-        // Questo applica la rotazione catturata dalla IA nello spazio del GENITORE dell'osso
-        // (es. la spalla) e NON nell'asse locale distorto della T-Pose di Mixamo.
-        const targetQuat = new THREE.Quaternion()
-            .copy(deltaQuat)
-            .multiply(restQuat);
+        // Moltiplichiamo il delta corretto per la T-Pose originale
+        const targetQuat = new THREE.Quaternion().copy(restQuat).multiply(deltaQuat);
 
         boneTargets[name] = { bone: bone, target: targetQuat, lerp: lerpSpeed };
     } catch (e) {}
@@ -378,7 +378,7 @@ const isPartVisible = (landmarks, indices, minConf = 0.35) => {
 };
 
 // ==========================================
-// 9. CALLBACK MEDIAPIPE
+// 9. CALLBACK MEDIAPIPE (FIX BRACCIA ALZATE)
 // ==========================================
 const videoElement = document.getElementById('input_video');
 
@@ -401,6 +401,12 @@ const onResults = (results) => {
 
     dbg.updateParts(trackingState);
 
+    // --- CONFIGURAZIONE ASSI MIXAMO ---
+    // L'asse Z nelle braccia controlla il movimento su/giù.
+    // Invertendolo (z: -1), le braccia andranno giù quando le abbassi.
+    const armFix = { x: 1, y: 1, z: -1 }; 
+    const standardFix = { x: 1, y: 1, z: 1 };
+
     // --- LAYER POSE ---
     if (poseLms && worldLandmarks) {
         try {
@@ -411,32 +417,31 @@ const onResults = (results) => {
             dbg.setKali(!!rp);
 
             if (rp) {
-                // Non passiamo più l'axisFix manuale! La matematica risolve il retargeting.
                 if (trackingState.corpo) {
-                    if (rp.Hips) setBoneTarget("hips", rp.Hips.rotation, 0.3);
-                    if (rp.Spine) setBoneTarget("spine", rp.Spine, 0.3);
+                    if (rp.Hips) setBoneTarget("hips", rp.Hips.rotation, 0.3, standardFix);
+                    if (rp.Spine) setBoneTarget("spine", rp.Spine, 0.3, standardFix);
                 }
                 
                 if (trackingState.braccioDx) {
-                    setBoneTarget("rightupperarm", rp.RightUpperArm, 0.35);
-                    setBoneTarget("rightforearm",  rp.RightLowerArm, 0.35);
-                    setBoneTarget("righthand", rp.RightHand, 0.35);
+                    setBoneTarget("rightupperarm", rp.RightUpperArm, 0.35, armFix);
+                    setBoneTarget("rightforearm",  rp.RightLowerArm, 0.35, armFix);
+                    setBoneTarget("righthand", rp.RightHand, 0.35, armFix);
                 }
 
                 if (trackingState.braccioSx) {
-                    setBoneTarget("leftupperarm",  rp.LeftUpperArm,  0.35);
-                    setBoneTarget("leftforearm",   rp.LeftLowerArm,  0.35);
-                    setBoneTarget("lefthand",  rp.LeftHand,  0.35);
+                    setBoneTarget("leftupperarm",  rp.LeftUpperArm,  0.35, armFix);
+                    setBoneTarget("leftforearm",   rp.LeftLowerArm,  0.35, armFix);
+                    setBoneTarget("lefthand",  rp.LeftHand,  0.35, armFix);
                 }
 
                 if (trackingState.gambaDx) {
-                    setBoneTarget("rightupperleg", rp.RightUpperLeg, 0.3);
-                    setBoneTarget("rightlowerleg", rp.RightLowerLeg, 0.3);
+                    setBoneTarget("rightupperleg", rp.RightUpperLeg, 0.3, standardFix);
+                    setBoneTarget("rightlowerleg", rp.RightLowerLeg, 0.3, standardFix);
                 }
 
                 if (trackingState.gambaSx) {
-                    setBoneTarget("leftupperleg",  rp.LeftUpperLeg,  0.3);
-                    setBoneTarget("leftlowerleg",  rp.LeftLowerLeg,  0.3);
+                    setBoneTarget("leftupperleg",  rp.LeftUpperLeg,  0.3, standardFix);
+                    setBoneTarget("leftlowerleg",  rp.LeftLowerLeg,  0.3, standardFix);
                 }
             }
         } catch (error) {
@@ -453,13 +458,12 @@ const onResults = (results) => {
                 runtime: "mediapipe", video: videoElement
             });
 
-            // La faccia usa output grezzi specifici che vanno scalati e invertiti
-            // rispetto al Pose solver.
             if (rf && rf.head) {
                 const h = rf.head;
+                // La testa in Kalidokit è già esportata con questi modificatori specifici
                 const headRot = { x: -h.x * 0.5, y: h.y * 0.5, z: -h.z * 0.5 };
-                setBoneTarget("neck", headRot, 0.35);
-                setBoneTarget("head", headRot, 0.35);
+                setBoneTarget("neck", headRot, 0.35, standardFix);
+                setBoneTarget("head", headRot, 0.35, standardFix);
             }
         } catch (error) {
             console.warn("[Face solve error]", error);
