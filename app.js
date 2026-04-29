@@ -215,6 +215,10 @@ window.addEventListener('resize', () => {
     camera.aspect = viewport.clientWidth / viewport.clientHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+    // --- AGGIUNGI QUESTA RIGA QUI ---
+    if (MocapVisualAnnotations.css2dRenderer) {
+        MocapVisualAnnotations.css2dRenderer.setSize(viewport.clientWidth, viewport.clientHeight);
+    }
 });
 
 // ==========================================
