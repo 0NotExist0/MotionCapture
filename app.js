@@ -267,7 +267,8 @@ const setupRig = (loadedModel) => {
                     .trim();
                 
                 skeleton[name] = bone;
-                boneRestQuats[name] = bone.quaternion.clone(); // Salvataggio della rest pose
+                // Salvataggio essenziale della rest pose
+                boneRestQuats[name] = bone.quaternion.clone(); 
                 boneCount++;
             });
         }
@@ -275,7 +276,6 @@ const setupRig = (loadedModel) => {
 
     dbg.setBones(boneCount);
     UI.log(`Rig OK — ${boneCount} ossa trovate e Rest Poses salvate.`, 'info');
-    UI.log(`Ossa: ${Object.keys(skeleton).join(', ')}`, 'info');
 
     if (boneCount === 0) {
         UI.log("ERRORE: nessuna osso trovata! Il modello non ha SkinnedMesh riggata.", 'error');
@@ -328,9 +328,9 @@ document.getElementById('file-upload').addEventListener('change', (e) => {
 });
 
 // ==========================================
-// 8. REGISTRAZIONE TARGET (Mixamo Fix & Rest Pose Multiplier)
+// 8. REGISTRAZIONE TARGET
 // ==========================================
-const setBoneTarget = (name, rotation, lerpSpeed = 0.3, inverts = {x:1, y:1, z:1}) => {
+const setBoneTarget = (name, rotation, lerpSpeed = 0.35, inverts = {x:1, y:1, z:1}) => {
     if (!rotation) return;
     
     if (
@@ -350,6 +350,7 @@ const setBoneTarget = (name, rotation, lerpSpeed = 0.3, inverts = {x:1, y:1, z:1
         const euler = new THREE.Euler(rx, ry, rz, 'XYZ');
         const deltaQuat = new THREE.Quaternion().setFromEuler(euler);
         
+        // Moltiplichiamo il delta calcolato per il bind pose originale
         const restQuat = boneRestQuats[name] || new THREE.Quaternion();
         const targetQuat = restQuat.clone().multiply(deltaQuat);
 
@@ -359,7 +360,8 @@ const setBoneTarget = (name, rotation, lerpSpeed = 0.3, inverts = {x:1, y:1, z:1
     }
 };
 
-const checkVis = (landmarks, index, minConfidence = 0.5) => {
+// Soglia di visibilità abbassata per evitare blocchi innaturali via webcam
+const checkVis = (landmarks, index, minConfidence = 0.15) => {
     if (!landmarks) return false;
     return landmarks[index] && landmarks[index].visibility > minConfidence;
 };
@@ -376,7 +378,8 @@ const onResults = (results) => {
 
     if (!mocapActive || !model) return;
 
-    const worldLandmarks = results.poseWorldLandmarks ?? null;
+    // IL FIX CRITICO: Ripristinato il fallback ea/za per le versioni minificate
+    const worldLandmarks = results.poseWorldLandmarks || results.ea || results.za || null;
 
     // --- LAYER POSE (CORPO E ARTI) ---
     if (results.poseLandmarks && worldLandmarks) {
@@ -390,46 +393,42 @@ const onResults = (results) => {
             dbg.setKali(!!rp);
 
             if (rp) {
+                // Modificatori per normalizzare il rig Mixamo
                 const mixamoAxisFix = { x: 1, y: -1, z: -1 }; 
 
-                // Hips (Bacino)
                 if (rp.Hips && rp.Hips.rotation) {
                     setBoneTarget("hips", rp.Hips.rotation, 0.3, mixamoAxisFix);
                 }
 
-                // Spine (Spina dorsale)
                 if (rp.Spine) {
                     setBoneTarget("spine", rp.Spine, 0.3, mixamoAxisFix);
                 }
                 
-                // Braccio Destro (Gomito = 14, Polso = 16)
-                if (rp.RightUpperArm && checkVis(results.poseLandmarks, 14, 0.4)) 
-                    setBoneTarget("rightupperarm", rp.RightUpperArm, 0.3, mixamoAxisFix);
-                if (rp.RightLowerArm && checkVis(results.poseLandmarks, 16, 0.4)) 
-                    setBoneTarget("rightforearm",  rp.RightLowerArm, 0.3, mixamoAxisFix);
+                // Braccia con filtro visibilità permissivo
+                if (rp.RightUpperArm && checkVis(results.poseLandmarks, 14)) 
+                    setBoneTarget("rightupperarm", rp.RightUpperArm, 0.35, mixamoAxisFix);
+                if (rp.RightLowerArm && checkVis(results.poseLandmarks, 16)) 
+                    setBoneTarget("rightforearm",  rp.RightLowerArm, 0.35, mixamoAxisFix);
 
-                // Braccio Sinistro (Gomito = 13, Polso = 15)
-                if (rp.LeftUpperArm && checkVis(results.poseLandmarks, 13, 0.4))  
-                    setBoneTarget("leftupperarm",  rp.LeftUpperArm,  0.3, mixamoAxisFix);
-                if (rp.LeftLowerArm && checkVis(results.poseLandmarks, 15, 0.4))  
-                    setBoneTarget("leftforearm",   rp.LeftLowerArm,  0.3, mixamoAxisFix);
+                if (rp.LeftUpperArm && checkVis(results.poseLandmarks, 13))  
+                    setBoneTarget("leftupperarm",  rp.LeftUpperArm,  0.35, mixamoAxisFix);
+                if (rp.LeftLowerArm && checkVis(results.poseLandmarks, 15))  
+                    setBoneTarget("leftforearm",   rp.LeftLowerArm,  0.35, mixamoAxisFix);
 
-                // Mani
-                if (rp.RightHand && checkVis(results.poseLandmarks, 16, 0.4)) 
-                    setBoneTarget("righthand", rp.RightHand, 0.3, mixamoAxisFix);
-                if (rp.LeftHand && checkVis(results.poseLandmarks, 15, 0.4))  
-                    setBoneTarget("lefthand",  rp.LeftHand,  0.3, mixamoAxisFix);
+                if (rp.RightHand && checkVis(results.poseLandmarks, 16)) 
+                    setBoneTarget("righthand", rp.RightHand, 0.35, mixamoAxisFix);
+                if (rp.LeftHand && checkVis(results.poseLandmarks, 15))  
+                    setBoneTarget("lefthand",  rp.LeftHand,  0.35, mixamoAxisFix);
 
-                // Gamba Destra (Ginocchio = 26, Caviglia = 28)
-                if (rp.RightUpperLeg && checkVis(results.poseLandmarks, 26, 0.4)) 
+                // Gambe
+                if (rp.RightUpperLeg && checkVis(results.poseLandmarks, 26)) 
                     setBoneTarget("rightupperleg", rp.RightUpperLeg, 0.3, mixamoAxisFix);
-                if (rp.RightLowerLeg && checkVis(results.poseLandmarks, 28, 0.4)) 
+                if (rp.RightLowerLeg && checkVis(results.poseLandmarks, 28)) 
                     setBoneTarget("rightlowerleg", rp.RightLowerLeg, 0.3, mixamoAxisFix);
 
-                // Gamba Sinistra (Ginocchio = 25, Caviglia = 27)
-                if (rp.LeftUpperLeg && checkVis(results.poseLandmarks, 25, 0.4))  
+                if (rp.LeftUpperLeg && checkVis(results.poseLandmarks, 25))  
                     setBoneTarget("leftupperleg",  rp.LeftUpperLeg,  0.3, mixamoAxisFix);
-                if (rp.LeftLowerLeg && checkVis(results.poseLandmarks, 27, 0.4))  
+                if (rp.LeftLowerLeg && checkVis(results.poseLandmarks, 27))  
                     setBoneTarget("leftlowerleg",  rp.LeftLowerLeg,  0.3, mixamoAxisFix);
             }
         } catch (error) {
@@ -447,8 +446,8 @@ const onResults = (results) => {
             if (rf && rf.head) {
                 const h = rf.head;
                 const headRot = { x: -h.x * 0.5, y: h.y * 0.5, z: -h.z * 0.5 };
-                setBoneTarget("neck", headRot, 0.3);
-                setBoneTarget("head", headRot, 0.3);
+                setBoneTarget("neck", headRot, 0.35);
+                setBoneTarget("head", headRot, 0.35);
             }
         } catch (error) {
             console.warn("[Face solve error]", error);
@@ -489,7 +488,6 @@ try {
         UI.setTrackerReady();
         setTimeout(() => UI.hideLoading(), 800);
         UI.log("Telecamera pronta. Carica un modello e premi ▶ Avvia.", 'info');
-        UI.log("SUGGERIMENTO: Assicurati che braccia e gambe siano visibili per muoverle.", 'info');
     });
 
 } catch (e) {
@@ -499,7 +497,7 @@ try {
 }
 
 // ==========================================
-// 11. RENDER LOOP (Animazione Continua Fluida)
+// 11. RENDER LOOP (Animazione Continua)
 // ==========================================
 (function animate() {
     requestAnimationFrame(animate);
@@ -507,8 +505,7 @@ try {
     if (mocapActive && model) {
         for (const key in boneTargets) {
             const data = boneTargets[key];
-            // Slerp ricalibrato a 0.35 per ridurre la latenza visiva
-            data.bone.quaternion.slerp(data.target, 0.35);
+            data.bone.quaternion.slerp(data.target, data.lerp);
         }
     }
 
