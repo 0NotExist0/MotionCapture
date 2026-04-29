@@ -346,7 +346,7 @@ document.getElementById('file-upload').addEventListener('change', (e) => {
 });
 
 // ==========================================
-// 8. LOGICA DI TARGETING CON SWIZZLING (SCAMBIO ASSI) E FALLBACK
+// 8. LOGICA DI TARGETING ESCLUSIVA PER MIXAMO (SWIZZLING)
 // ==========================================
 const setBoneTarget = (name, rotation, lerpSpeed = 0.35, map = { x: 'x', y: 'y', z: 'z', ix: 1, iy: 1, iz: 1 }, isActive = true) => {
     const bone = findBone(name);
@@ -354,15 +354,16 @@ const setBoneTarget = (name, rotation, lerpSpeed = 0.35, map = { x: 'x', y: 'y',
 
     const restQuat = boneRestQuats[name] || new THREE.Quaternion();
 
-    // FALLBACK A T-POSE: se perdiamo il tracking, torniamo alla posa base
+    // FALLBACK A T-POSE: essenziale per stabilizzare arti persi dalla webcam
     if (!isActive || !rotation) {
         boneTargets[name] = { bone: bone, target: restQuat, lerp: lerpSpeed * 0.5 };
         return;
     }
 
     try {
-        // SWIZZLING: Leggiamo l'asse indicato dalla mappa e applichiamo l'eventuale inversione
-        // Es: se map.x = 'z', stiamo prendendo la rotazione Z di Kalidokit e mettendola nella X del modello
+        // SWIZZLING: Mappiamo dinamicamente gli assi VRM di Kalidokit 
+        // sui caotici assi locali di Mixamo. 
+        // Es: la rotazione X (map.x) potrebbe leggere il valore Z di Kalidokit.
         const rx = rotation[map.x] * map.ix;
         const ry = rotation[map.y] * map.iy;
         const rz = rotation[map.z] * map.iz;
@@ -370,7 +371,7 @@ const setBoneTarget = (name, rotation, lerpSpeed = 0.35, map = { x: 'x', y: 'y',
         const euler = new THREE.Euler(rx, ry, rz, 'XYZ');
         const deltaQuat = new THREE.Quaternion().setFromEuler(euler);
         
-        // Moltiplichiamo per la posa di riposo locale
+        // Applichiamo la rotazione locale partendo rigorosamente dalla T-Pose zero
         const targetQuat = new THREE.Quaternion().copy(restQuat).multiply(deltaQuat);
 
         boneTargets[name] = { bone: bone, target: targetQuat, lerp: lerpSpeed };
@@ -386,7 +387,7 @@ const isPartVisible = (landmarks, indices, minConf = 0.35) => {
 
 
 // ==========================================
-// 9. CALLBACK MEDIAPIPE (MAPPATURE ASSI E MIRRORING)
+// 9. CALLBACK MEDIAPIPE (CORE MIXAMO & MIRRORING)
 // ==========================================
 const videoElement = document.getElementById('input_video');
 
@@ -409,20 +410,25 @@ const onResults = (results) => {
 
     dbg.updateParts(trackingState);
 
-    // --- CONFIGURAZIONE MAPPATURE ASSI (SWIZZLING) ---
-    // Struttura: x, y, z dicono quale asse di Kalidokit leggere. ix, iy, iz sono il segno (1 o -1).
+    // --- MAPPATURA ASSI SPECIFICA PER RIG MIXAMO ---
     
-    // Mappatura Standard
-    const standardMap = { x: 'x', y: 'y', z: 'z', ix: 1, iy: 1, iz: 1 };
-    
-    // Mappatura per risolvere la torsione dorsale (Spine)
-    // Se il modello si piega all'indietro quando tu vai in avanti, basta mettere ix: -1
-    const spineMap = { x: 'x', y: 'y', z: 'z', ix: 1, iy: 1, iz: 1 }; 
+    // Testa e Busto mantengono un mapping abbastanza standard, 
+    // ma invertiamo la Z per evitare flessioni anomale del torso.
+    const mixamoSpineMap = { x: 'x', y: 'y', z: 'z', ix: 1, iy: 1, iz: -1 }; 
 
-    // Mappature Braccia: Mixamo spesso richiede che la X e la Z vengano invertite o scambiate
-    // Se vedi che alzando il braccio l'avatar lo ruota in orizzontale, devi provare a scambiare 'x' con 'z'
-    const leftArmMap = { x: 'x', y: 'y', z: 'z', ix: 1, iy: 1, iz: 1 }; 
-    const rightArmMap = { x: 'x', y: 'y', z: 'z', ix: 1, iy: -1, iz: -1 }; 
+    // BRACCIA MIXAMO: Qui avviene la magia. 
+    // Scambiamo la Y con la Z (o X con Y) perché in Mixamo l'asse del braccio corre in direzioni diverse.
+    // L'input DX guida il lato SX dell'avatar (Mirroring da specchio).
+    
+    // Braccio Sinistro dell'Avatar (Riceve input braccio destro webcam)
+    const mixamoLeftArmMap = { x: 'z', y: 'y', z: 'x', ix: -1, iy: 1, iz: 1 }; 
+    
+    // Braccio Destro dell'Avatar (Riceve input braccio sinistro webcam)
+    // In Mixamo il lato destro è capovolto, quindi invertiamo pesantemente i segni di Y e Z
+    const mixamoRightArmMap = { x: 'z', y: 'y', z: 'x', ix: -1, iy: -1, iz: -1 }; 
+
+    // Gambe Mixamo (Solitamente la Y è invertita)
+    const mixamoLegMap = { x: 'x', y: 'y', z: 'z', ix: 1, iy: -1, iz: 1 };
 
     // --- LAYER POSE ---
     if (poseLms && worldLandmarks) {
@@ -434,28 +440,28 @@ const onResults = (results) => {
             dbg.setKali(!!rp);
 
             if (rp) {
-                // CORPO (Hips & Spine)
-                setBoneTarget("hips", rp.Hips ? rp.Hips.rotation : null, 0.3, spineMap, trackingState.corpo);
-                setBoneTarget("spine", rp.Spine, 0.3, spineMap, trackingState.corpo);
+                // CORPO
+                setBoneTarget("hips", rp.Hips ? rp.Hips.rotation : null, 0.3, mixamoSpineMap, trackingState.corpo);
+                setBoneTarget("spine", rp.Spine, 0.3, mixamoSpineMap, trackingState.corpo);
 
-                // MIRRORING LOGICO INCROCIATO
+                // MIRRORING LOGICO INCROCIATO SULLE BRACCIA MIXAMO
                 
-                // Input DX (Webcam) -> Braccio SX (Modello 3D)
-                setBoneTarget("leftupperarm",  rp.RightUpperArm, 0.35, leftArmMap, trackingState.braccioDx);
-                setBoneTarget("leftforearm",   rp.RightLowerArm, 0.35, leftArmMap, trackingState.braccioDx);
-                setBoneTarget("lefthand",      rp.RightHand,     0.35, leftArmMap, trackingState.braccioDx);
+                // Input Destro Utente -> Osso Sinistro Avatar
+                setBoneTarget("leftupperarm",  rp.RightUpperArm, 0.35, mixamoLeftArmMap, trackingState.braccioDx);
+                setBoneTarget("leftforearm",   rp.RightLowerArm, 0.35, mixamoLeftArmMap, trackingState.braccioDx);
+                setBoneTarget("lefthand",      rp.RightHand,     0.35, mixamoLeftArmMap, trackingState.braccioDx);
 
-                // Input SX (Webcam) -> Braccio DX (Modello 3D)
-                setBoneTarget("rightupperarm", rp.LeftUpperArm, 0.35, rightArmMap, trackingState.braccioSx);
-                setBoneTarget("rightforearm",  rp.LeftLowerArm, 0.35, rightArmMap, trackingState.braccioSx);
-                setBoneTarget("righthand",     rp.LeftHand,     0.35, rightArmMap, trackingState.braccioSx);
+                // Input Sinistro Utente -> Osso Destro Avatar
+                setBoneTarget("rightupperarm", rp.LeftUpperArm, 0.35, mixamoRightArmMap, trackingState.braccioSx);
+                setBoneTarget("rightforearm",  rp.LeftLowerArm, 0.35, mixamoRightArmMap, trackingState.braccioSx);
+                setBoneTarget("righthand",     rp.LeftHand,     0.35, mixamoRightArmMap, trackingState.braccioSx);
 
                 // GAMBE
-                setBoneTarget("leftupperleg", rp.RightUpperLeg, 0.3, standardMap, trackingState.gambaDx);
-                setBoneTarget("leftlowerleg", rp.RightLowerLeg, 0.3, standardMap, trackingState.gambaDx);
+                setBoneTarget("leftupperleg", rp.RightUpperLeg, 0.3, mixamoLegMap, trackingState.gambaDx);
+                setBoneTarget("leftlowerleg", rp.RightLowerLeg, 0.3, mixamoLegMap, trackingState.gambaDx);
 
-                setBoneTarget("rightupperleg",  rp.LeftUpperLeg,  0.3, standardMap, trackingState.gambaSx);
-                setBoneTarget("rightlowerleg",  rp.LeftLowerLeg,  0.3, standardMap, trackingState.gambaSx);
+                setBoneTarget("rightupperleg",  rp.LeftUpperLeg,  0.3, mixamoLegMap, trackingState.gambaSx);
+                setBoneTarget("rightlowerleg",  rp.LeftLowerLeg,  0.3, mixamoLegMap, trackingState.gambaSx);
             }
         } catch (error) {
             console.warn("[Pose solve error]", error);
@@ -473,16 +479,17 @@ const onResults = (results) => {
 
             if (rf && rf.head) {
                 const h = rf.head;
-                // La testa usa Eulers standard custom per correggere lo specchio
+                // Eulers custom per la rotazione specchiata della testa
                 const headRot = { x: -h.x * 0.5, y: -h.y * 0.5, z: h.z * 0.5 };
-                setBoneTarget("neck", headRot, 0.35, standardMap, true);
-                setBoneTarget("head", headRot, 0.35, standardMap, true);
+                setBoneTarget("neck", headRot, 0.35, { x: 'x', y: 'y', z: 'z', ix: 1, iy: 1, iz: 1 }, true);
+                setBoneTarget("head", headRot, 0.35, { x: 'x', y: 'y', z: 'z', ix: 1, iy: 1, iz: 1 }, true);
             }
         } catch (error) {
             console.warn("[Face solve error]", error);
         }
     }
 };
+
 // ==========================================
 // 10. MEDIAPIPE INIT
 // ==========================================
