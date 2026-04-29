@@ -20,7 +20,7 @@ const UI = {
         this.overlay.style.pointerEvents = 'all';
         this.text.innerText = message;
         this.bar.style.width = progress + '%';
-        this.log(`Avvio operazione: ${message}`, 'info');
+        this.log(`Operazione: ${message}`, 'info');
     },
     
     updateProgress(progress) {
@@ -34,32 +34,22 @@ const UI = {
         line.innerText = `[${time}] ${message}`;
         this.logBox.appendChild(line);
         this.logBox.scrollTop = this.logBox.scrollHeight;
-        
-        if(level === 'error') console.error(message);
-        else if(level === 'warn') console.warn(message);
-        else console.log(message);
     },
     
     hideLoading() {
-        this.log("Chiusura Overlay...", 'info');
         this.overlay.style.opacity = '0';
         this.overlay.style.pointerEvents = 'none';
-        setTimeout(() => {
-            this.overlay.style.display = 'none';
-        }, 300);
+        setTimeout(() => this.overlay.style.display = 'none', 300);
     },
     
     setTrackerReady() {
         this.status.innerText = "Tracking Attivo";
         this.status.className = "status-online";
-        this.log("Sistema di tracking attivato con successo.", 'info');
     }
 };
 
-UI.log("Inizializzazione Web Mocap Studio avviata...", "info");
-
 // ==========================================
-// 2. SETUP SCENA 3D
+// 2. SETUP SCENA 3D (Illuminazione migliorata)
 // ==========================================
 const viewport = document.getElementById('viewport');
 const scene = new THREE.Scene();
@@ -75,9 +65,13 @@ viewport.appendChild(renderer.domElement);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 1, 0);
 
-scene.add(new THREE.AmbientLight(0xffffff, 0.8));
-const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
-dirLight.position.set(5, 5, 5);
+// Aggiungiamo una HemisphereLight per schiarire le ombre nere
+const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.2);
+hemiLight.position.set(0, 20, 0);
+scene.add(hemiLight);
+
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(5, 10, 5);
 scene.add(dirLight);
 
 const gridHelper = new THREE.GridHelper(10, 10, 0x444444, 0x222222);
@@ -93,10 +87,10 @@ window.addEventListener('resize', () => {
 });
 
 // ==========================================
-// 3. CARICAMENTO ASSET & PREFAB
+// 3. CARICAMENTO ASSET & PREFAB (Material Fix)
 // ==========================================
 const setupRig = (loadedModel) => {
-    UI.log("Generazione Gerarchia Ossa...", 'info');
+    UI.log("Generazione Gerarchia Ossa e Fix Materiali...", 'info');
     if (model) scene.remove(model); 
     
     model = loadedModel;
@@ -104,15 +98,29 @@ const setupRig = (loadedModel) => {
     
     skeleton = {};
     let boneCount = 0;
+    
+    // Default Material grigio per evitare modelli completamente neri
+    const defaultMaterial = new THREE.MeshStandardMaterial({
+        color: 0xaaaaaa, roughness: 0.6, metalness: 0.1, skinning: true
+    });
+
     model.traverse((obj) => {
+        // Se è una mesh, sovrascriviamo il materiale rotto di Mixamo
+        if (obj.isMesh) {
+            obj.material = defaultMaterial;
+        }
+        
+        // Parsing super-aggressivo per i nomi delle ossa
         if (obj.isBone) {
-            const standardName = obj.name.replace('mixamorig', '').replace(':', '').toLowerCase();
-            skeleton[standardName] = obj;
+            let name = obj.name.toLowerCase();
+            name = name.replace('mixamorig', '').replace(':', '').replace('_', '');
+            skeleton[name] = obj;
             boneCount++;
         }
     });
     
     UI.log(`Rig Setup Completato. Trovate ${boneCount} ossa.`, 'info');
+    console.log("Dizionario Ossa:", Object.keys(skeleton)); // Da controllare in F12 se non si muove
     UI.hideLoading(); 
 };
 
@@ -121,15 +129,12 @@ document.getElementById('file-upload').addEventListener('change', (e) => {
     if (!file) return;
     
     UI.showLoading(`Lettura file ${file.name}...`, 0);
-    UI.log(`Formato file rilevato: ${file.name.split('.').pop()}`, 'info');
-    
     const extension = file.name.split('.').pop().toLowerCase();
     const reader = new FileReader();
     
     reader.onprogress = (event) => {
         if (event.lengthComputable) {
-            const percent = (event.loaded / event.total) * 100;
-            UI.updateProgress(percent);
+            UI.updateProgress((event.loaded / event.total) * 100);
         }
     };
     
@@ -139,30 +144,18 @@ document.getElementById('file-upload').addEventListener('change', (e) => {
         
         setTimeout(() => {
             const contents = event.target.result;
-            
             try {
-                if (extension === 'gltf' || extension === 'glb') {
-                    UI.log("Avvio GLTFLoader...", 'info');
+                if (extension === 'glb' || extension === 'gltf') {
                     const loader = new GLTFLoader();
-                    loader.parse(contents, '', (gltf) => {
-                        UI.log("GLTF Parsato con successo.", 'info');
-                        setupRig(gltf.scene);
-                    }, (err) => { 
-                        UI.log(`Errore loader GLTF: ${err}`, 'error');
-                        alert("Impossibile leggere il file GLB/GLTF.");
-                        UI.hideLoading(); 
-                    });
-                    
+                    loader.parse(contents, '', (gltf) => setupRig(gltf.scene), err => { throw err; });
                 } else if (extension === 'fbx') {
-                    UI.log("Avvio FBXLoader. Attendere...", 'warn');
                     const loader = new FBXLoader();
                     const fbxModel = loader.parse(contents);
-                    UI.log("FBX Parsato con successo.", 'info');
                     fbxModel.scale.set(0.01, 0.01, 0.01); 
                     setupRig(fbxModel);
                 }
             } catch (err) {
-                UI.log(`Eccezione Critica: ${err.message}`, 'error');
+                UI.log(`Errore Parsing: ${err.message}`, 'error');
                 UI.hideLoading();
             }
         }, 100); 
@@ -172,16 +165,25 @@ document.getElementById('file-upload').addEventListener('change', (e) => {
 });
 
 // ==========================================
-// 4. IK SOLVER (AVATAR MASKING)
+// 4. IK SOLVER (Safeguards aggiunti)
 // ==========================================
 const rigBone = (name, rotation, lerp = 0.3) => {
+    // Null Checks rigorosi: se l'osso non esiste o MediaPipe non ha dati, usciamo.
+    if (!skeleton || !rotation) return; 
+    
     const bone = skeleton[name.toLowerCase()];
     if (!bone) return;
     
-    const target = new THREE.Quaternion().setFromEuler(
-        new THREE.Euler(rotation.x, rotation.y, rotation.z)
-    );
-    bone.quaternion.slerp(target, lerp);
+    // Se rotation è valido, applichiamo il Quaternione
+    try {
+        const target = new THREE.Quaternion().setFromEuler(
+            new THREE.Euler(rotation.x, rotation.y, rotation.z)
+        );
+        bone.quaternion.slerp(target, lerp);
+    } catch (e) {
+        // Intercettiamo errori matematici silenti
+        console.error("Errore Slerp su osso:", name, e);
+    }
 };
 
 const videoElement = document.getElementById('input_video');
@@ -189,8 +191,6 @@ const videoElement = document.getElementById('input_video');
 const onResults = (results) => {
     if (!model) return;
 
-    // --- LAYER 1: ISOLAMENTO CORPO ---
-    // Questo tracker si basa sulla posizione delle spalle e del bacino.
     if (results.poseLandmarks) {
         const riggedPose = Kalidokit.Pose.solve(results.poseWorldLandmarks, results.poseLandmarks, {
             runtime: "mediapipe",
@@ -198,32 +198,25 @@ const onResults = (results) => {
         });
 
         if (riggedPose) {
-            // Nota: Abbiamo Rimosso il Neck da qui!
-            rigBone("hips", riggedPose.Hips.rotation, 0.1);
-            rigBone("spine", riggedPose.Spine.rotation);
-            rigBone("rightupperarm", riggedPose.RightUpperArm.rotation);
-            rigBone("rightforearm", riggedPose.RightLowerArm.rotation);
-            rigBone("leftupperarm", riggedPose.LeftUpperArm.rotation);
-            rigBone("leftforearm", riggedPose.LeftLowerArm.rotation);
+            // Nota: Kalidokit potrebbe non calcolare alcune ossa se fuori campo.
+            // Il nostro nuovo rigBone ora ignorerà in sicurezza i valori 'undefined'.
+            if(riggedPose.Hips) rigBone("hips", riggedPose.Hips.rotation, 0.1);
+            if(riggedPose.Spine) rigBone("spine", riggedPose.Spine.rotation);
+            if(riggedPose.RightUpperArm) rigBone("rightupperarm", riggedPose.RightUpperArm.rotation);
+            if(riggedPose.RightLowerArm) rigBone("rightforearm", riggedPose.RightLowerArm.rotation);
+            if(riggedPose.LeftUpperArm) rigBone("leftupperarm", riggedPose.LeftUpperArm.rotation);
+            if(riggedPose.LeftLowerArm) rigBone("leftforearm", riggedPose.LeftLowerArm.rotation);
         }
     }
 
-    // --- LAYER 2: ISOLAMENTO TESTA/VISO ---
-    // Questo tracker si basa su una rete neurale ad alta densità (FaceMesh)
-    // che rileva i micromovimenti indipendentemente dal resto del corpo.
     if (results.faceLandmarks) {
         const riggedFace = Kalidokit.Face.solve(results.faceLandmarks, {
             runtime: "mediapipe",
             video: videoElement
         });
 
-        if (riggedFace) {
-            // riggedFace.head ci restituisce le rotazioni X, Y, Z della testa
+        if (riggedFace && riggedFace.head) {
             const headRot = riggedFace.head;
-            
-            // Distribuiamo la rotazione al 50% sul collo e 50% sulla testa.
-            // In Unity lo faresti con i pesi delle ossa, qui dimezziamo i radianti.
-            // Questo evita l'effetto "collo spezzato" tipico del Mocap a osso singolo.
             rigBone("neck", { x: headRot.x * 0.5, y: headRot.y * 0.5, z: headRot.z * 0.5 }, 0.5);
             rigBone("head", { x: headRot.x * 0.5, y: headRot.y * 0.5, z: headRot.z * 0.5 }, 0.5);
         }
@@ -234,13 +227,10 @@ const onResults = (results) => {
 // 5. INIZIALIZZAZIONE MEDIAPIPE
 // ==========================================
 UI.showLoading("Download Modelli IA MediaPipe...", 10);
-UI.log("Connessione ai CDN di jsdelivr per Holistic...", 'info');
 
 try {
     const holistic = new window.Holistic({
-        locateFile: (file) => {
-            return `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`;
-        }
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`
     });
 
     holistic.setOptions({
@@ -257,19 +247,15 @@ try {
     });
     
     cameraUtils.start().then(() => {
-        UI.log("Webcam avviata. Sistema Ready.", 'info');
         UI.updateProgress(100);
         UI.setTrackerReady();
         setTimeout(() => UI.hideLoading(), 800);
-    }).catch(err => {
-        UI.log(`Errore fotocamera: ${err.message}`, 'error');
-        document.getElementById('loading-text').innerText = "Accesso alla Fotocamera Negato.";
     });
 } catch (e) {
-    UI.log(`Errore inizializzazione: ${e.message}`, 'error');
+    UI.log(`Errore telecamera: ${e.message}`, 'error');
 }
 
-// Render Loop Principale
+// Main Render Loop
 function animate() {
     requestAnimationFrame(animate);
     renderer.render(scene, camera);
