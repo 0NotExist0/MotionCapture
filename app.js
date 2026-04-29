@@ -265,9 +265,6 @@ const setupRig = (loadedModel) => {
     dbg.setBones(boneCount);
     UI.log(`Rig OK — ${boneCount} ossa trovate.`, 'info');
 
-    const boneNames = Object.keys(skeleton);
-    console.log("=== OSSA NORMALIZZATE ===", boneNames);
-
     if (boneCount === 0) {
         UI.log("ERRORE: nessuna osso trovata! Il modello non ha SkinnedMesh riggata.", 'error');
         dbg.setState('NO BONES', '#f00');
@@ -336,7 +333,7 @@ const rigBone = (name, rotation, lerp = 0.3) => {
 };
 
 // ==========================================
-// 9. CALLBACK MEDIAPIPE (Fix Assi Locali)
+// 9. CALLBACK MEDIAPIPE (Fix Proprietà API e Assi)
 // ==========================================
 const videoElement = document.getElementById('input_video');
 
@@ -347,7 +344,7 @@ const onResults = (results) => {
 
     if (!mocapActive || !model) return;
 
-    // --- LAYER POSE ---
+    // --- LAYER POSE (CORPO INTERO) ---
     if (results.poseLandmarks && results.poseWorldLandmarks) {
         try {
             const rp = Kalidokit.Pose.solve(
@@ -357,20 +354,27 @@ const onResults = (results) => {
             );
             
             if (rp) {
-                // Se anche il corpo o le braccia dovessero muoversi al contrario, 
-                // basterà mettere un meno (-) davanti a rp.OSSO.rotation.x o .z
-                if (rp.Hips)          rigBone("hips",          rp.Hips.rotation,          0.1);
-                if (rp.Spine)         rigBone("spine",         rp.Spine.rotation,         0.3);
-                if (rp.RightUpperArm) rigBone("rightupperarm", rp.RightUpperArm.rotation, 0.3);
-                if (rp.RightLowerArm) rigBone("rightforearm",  rp.RightLowerArm.rotation, 0.3);
-                if (rp.LeftUpperArm)  rigBone("leftupperarm",  rp.LeftUpperArm.rotation,  0.3);
-                if (rp.LeftLowerArm)  rigBone("leftforearm",   rp.LeftLowerArm.rotation,  0.3);
-                if (rp.RightHand)     rigBone("righthand",     rp.RightHand.rotation,     0.3);
-                if (rp.LeftHand)      rigBone("lefthand",      rp.LeftHand.rotation,      0.3);
-                if (rp.RightUpperLeg) rigBone("rightupperleg", rp.RightUpperLeg.rotation, 0.3);
-                if (rp.RightLowerLeg) rigBone("rightlowerleg", rp.RightLowerLeg.rotation, 0.3);
-                if (rp.LeftUpperLeg)  rigBone("leftupperleg",  rp.LeftUpperLeg.rotation,  0.3);
-                if (rp.LeftLowerLeg)  rigBone("leftlowerleg",  rp.LeftLowerLeg.rotation,  0.3);
+                // IL FIX: Hips ha .rotation, tutti gli altri SONO DIRETTAMENTE vettori {x, y, z}
+                if (rp.Hips) rigBone("hips", rp.Hips.rotation, 0.1);
+                
+                // Spine
+                if (rp.Spine) rigBone("spine", { x: rp.Spine.x, y: rp.Spine.y, z: rp.Spine.z }, 0.3);
+                
+                // Braccia (Nota: se si piegano al contrario, cambia segno a .z o .x)
+                if (rp.RightUpperArm) rigBone("rightupperarm", { x: rp.RightUpperArm.x, y: rp.RightUpperArm.y, z: rp.RightUpperArm.z }, 0.3);
+                if (rp.RightLowerArm) rigBone("rightforearm",  { x: rp.RightLowerArm.x, y: rp.RightLowerArm.y, z: rp.RightLowerArm.z }, 0.3);
+                if (rp.LeftUpperArm)  rigBone("leftupperarm",  { x: rp.LeftUpperArm.x,  y: rp.LeftUpperArm.y,  z: rp.LeftUpperArm.z },  0.3);
+                if (rp.LeftLowerArm)  rigBone("leftforearm",   { x: rp.LeftLowerArm.x,  y: rp.LeftLowerArm.y,  z: rp.LeftLowerArm.z },  0.3);
+                
+                // Mani
+                if (rp.RightHand) rigBone("righthand", { x: rp.RightHand.x, y: rp.RightHand.y, z: rp.RightHand.z }, 0.3);
+                if (rp.LeftHand)  rigBone("lefthand",  { x: rp.LeftHand.x,  y: rp.LeftHand.y,  z: rp.LeftHand.z },  0.3);
+                
+                // Gambe
+                if (rp.RightUpperLeg) rigBone("rightupperleg", { x: rp.RightUpperLeg.x, y: rp.RightUpperLeg.y, z: rp.RightUpperLeg.z }, 0.3);
+                if (rp.RightLowerLeg) rigBone("rightlowerleg", { x: rp.RightLowerLeg.x, y: rp.RightLowerLeg.y, z: rp.RightLowerLeg.z }, 0.3);
+                if (rp.LeftUpperLeg)  rigBone("leftupperleg",  { x: rp.LeftUpperLeg.x,  y: rp.LeftUpperLeg.y,  z: rp.LeftUpperLeg.z },  0.3);
+                if (rp.LeftLowerLeg)  rigBone("leftlowerleg",  { x: rp.LeftLowerLeg.x,  y: rp.LeftLowerLeg.y,  z: rp.LeftLowerLeg.z },  0.3);
             }
         } catch (error) {}
     }
@@ -384,9 +388,7 @@ const onResults = (results) => {
             
             if (rf && rf.head) {
                 const h = rf.head;
-                // FIX MIXAMO: Invertiamo l'asse X e Z moltiplicandoli per -1.
-                // h.x controlla il Pitch (Su e Giù). h.z controlla il Roll (Inclinazione).
-                // h.y (Yaw / rotazione destra-sinistra) di solito coincide e non serve invertirlo.
+                // Mantengo gli assi corretti dalla tua versione precedente
                 rigBone("neck", { x: -h.x * 0.5, y: h.y * 0.5, z: -h.z * 0.5 }, 0.5);
                 rigBone("head", { x: -h.x * 0.5, y: h.y * 0.5, z: -h.z * 0.5 }, 0.5);
             }
