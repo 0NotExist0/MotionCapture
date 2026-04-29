@@ -1,20 +1,55 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { FBXLoader } from 'three/addons/loaders/FBXLoader.js'; // Aggiunto il Loader FBX
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import * as Kalidokit from 'kalidokit';
 
 // ==========================================
-// 1. SETUP SCENA (Hierarchy & Inspector)
+// 1. UI MANAGER (Il tuo UIManager.cs)
 // ==========================================
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
-camera.position.set(0, 1.6, 3);
+const UI = {
+    overlay: document.getElementById('loading-overlay'),
+    text: document.getElementById('loading-text'),
+    bar: document.getElementById('progress-bar'),
+    status: document.getElementById('status-indicator'),
+    
+    showLoading(message, progress = 0) {
+        this.overlay.style.display = 'flex';
+        this.text.innerText = message;
+        this.bar.style.width = progress + '%';
+    },
+    
+    updateProgress(progress) {
+        this.bar.style.width = progress + '%';
+    },
+    
+    hideLoading() {
+        this.overlay.style.opacity = '0';
+        setTimeout(() => this.overlay.style.display = 'none', 300); // Dissolvenza in uscita
+    },
+    
+    setTrackerReady() {
+        this.status.innerText = "Tracking Attivo";
+        this.status.className = "status-online";
+    }
+};
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
+// Mostra caricamento iniziale
+UI.showLoading("Download Modelli IA (Holistic)...", 10);
+
+// ==========================================
+// 2. SETUP SCENA 3D
+// ==========================================
+const viewport = document.getElementById('viewport');
+const scene = new THREE.Scene();
+
+const camera = new THREE.PerspectiveCamera(45, viewport.clientWidth / viewport.clientHeight, 0.1, 1000);
+camera.position.set(0, 1.4, 3);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setSize(viewport.clientWidth, viewport.clientHeight);
 renderer.outputEncoding = THREE.sRGBEncoding;
-document.body.appendChild(renderer.domElement);
+viewport.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 1, 0);
@@ -24,72 +59,93 @@ const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
 dirLight.position.set(5, 5, 5);
 scene.add(dirLight);
 
+// Aggiungiamo una griglia di riferimento (come in Scene View)
+const gridHelper = new THREE.GridHelper(10, 10, 0x444444, 0x222222);
+scene.add(gridHelper);
+
 let model = null;
 let skeleton = {}; 
 
+window.addEventListener('resize', () => {
+    camera.aspect = viewport.clientWidth / viewport.clientHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+});
+
 // ==========================================
-// 2. LOGICA DI CARICAMENTO MULTI-FORMATO
+// 3. CARICAMENTO ASSET & PREFAB
 // ==========================================
-// Funzione helper per analizzare il Rig (equivalente a GetComponentInChildren<Transform>())
 const setupRig = (loadedModel) => {
-    if (model) scene.remove(model); // Pulisce la scena dal modello precedente
+    if (model) scene.remove(model); 
     
     model = loadedModel;
     scene.add(model);
     
-    // Mappatura delle ossa
     skeleton = {};
     model.traverse((obj) => {
         if (obj.isBone) {
-            // Rimuoviamo i prefissi di Mixamo e portiamo tutto in minuscolo
             const standardName = obj.name.replace('mixamorig', '').replace(':', '').toLowerCase();
             skeleton[standardName] = obj;
         }
     });
-    console.log("Rig Analizzato. Ossa trovate:", Object.keys(skeleton));
+    
+    console.log("Rig Setup Completato.");
+    UI.hideLoading(); // File elaborato, togliamo l'overlay
 };
 
 document.getElementById('file-upload').addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
     
-    // Estrae l'estensione del file per capire quale loader usare
+    UI.showLoading(`Lettura file ${file.name}...`, 0);
+    
     const extension = file.name.split('.').pop().toLowerCase();
     const reader = new FileReader();
     
-    reader.onload = (event) => {
-        const contents = event.target.result;
-        
-        if (extension === 'gltf' || extension === 'glb') {
-            console.log("Parsing modello GLTF/GLB...");
-            const loader = new GLTFLoader();
-            loader.parse(contents, '', (gltf) => {
-                setupRig(gltf.scene);
-            }, (err) => console.error(err));
-            
-        } else if (extension === 'fbx') {
-            console.log("Parsing modello FBX...");
-            const loader = new FBXLoader();
-            // L'FBX loader accetta direttamente l'ArrayBuffer
-            try {
-                const fbxModel = loader.parse(contents);
-                // Molti FBX di Mixamo sono 100 volte più grandi del normale in ThreeJS (differenza di scala cm/m)
-                fbxModel.scale.set(0.01, 0.01, 0.01); 
-                setupRig(fbxModel);
-            } catch (err) {
-                console.error("Errore nel parsing FBX. Assicurati che non sia un FBX ASCII (ThreeJS supporta solo FBX Binari):", err);
-            }
-        } else {
-            console.warn("Formato non supportato: " + extension);
+    // Simula una AsyncOperation per l'UI durante la lettura in memoria
+    reader.onprogress = (event) => {
+        if (event.lengthComputable) {
+            const percent = (event.loaded / event.total) * 100;
+            UI.updateProgress(percent);
         }
     };
     
-    // Leggiamo come ArrayBuffer, che va bene sia per GLB binari che per FBX binari
+    reader.onload = (event) => {
+        UI.showLoading("Estrazione e Compilazione Mesh...", 100);
+        
+        // Timeout per permettere al browser di renderizzare il testo prima di bloccarsi col parsing
+        setTimeout(() => {
+            const contents = event.target.result;
+            
+            if (extension === 'gltf' || extension === 'glb') {
+                const loader = new GLTFLoader();
+                loader.parse(contents, '', (gltf) => {
+                    setupRig(gltf.scene);
+                }, (err) => { console.error(err); UI.hideLoading(); });
+                
+            } else if (extension === 'fbx') {
+                const loader = new FBXLoader();
+                try {
+                    const fbxModel = loader.parse(contents);
+                    fbxModel.scale.set(0.01, 0.01, 0.01); 
+                    setupRig(fbxModel);
+                } catch (err) {
+                    alert("Errore FBX. Assicurati che sia Binario, non ASCII.");
+                    console.error(err);
+                    UI.hideLoading();
+                }
+            } else {
+                alert("Formato non supportato.");
+                UI.hideLoading();
+            }
+        }, 100); 
+    };
+    
     reader.readAsArrayBuffer(file); 
 });
 
 // ==========================================
-// 3. IK SOLVER (Animator Update)
+// 4. IK SOLVER
 // ==========================================
 const rigBone = (name, rotation, lerp = 0.3) => {
     const bone = skeleton[name.toLowerCase()];
@@ -98,7 +154,6 @@ const rigBone = (name, rotation, lerp = 0.3) => {
     const target = new THREE.Quaternion().setFromEuler(
         new THREE.Euler(rotation.x, rotation.y, rotation.z)
     );
-    // SmoothDamp / Slerp per movimenti fluidi
     bone.quaternion.slerp(target, lerp);
 };
 
@@ -125,7 +180,7 @@ const onResults = (results) => {
 };
 
 // ==========================================
-// 4. INIZIALIZZAZIONE TRACKER
+// 5. INIZIALIZZAZIONE MEDIAPIPE E WEBCAM
 // ==========================================
 try {
     const holistic = new window.Holistic({
@@ -144,12 +199,25 @@ try {
         onFrame: async () => { await holistic.send({image: videoElement}); },
         width: 640, height: 480
     });
-    cameraUtils.start();
+    
+    // Quando la camera si accende, il sistema è pronto
+    cameraUtils.start().then(() => {
+        UI.updateProgress(100);
+        UI.setTrackerReady();
+        
+        // Aspetta mezzo secondo per far vedere il 100% all'utente, poi nascondi
+        setTimeout(() => {
+            if(!model) UI.showLoading("In attesa del Modello...", 100);
+            else UI.hideLoading();
+        }, 500);
+        
+    });
 } catch (e) {
     console.error("Errore inizializzazione MediaPipe:", e);
+    document.getElementById('loading-text').innerText = "Errore di Inizializzazione.";
 }
 
-// Main Render Loop
+// Render Loop Principale
 function animate() {
     requestAnimationFrame(animate);
     renderer.render(scene, camera);
