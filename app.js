@@ -697,10 +697,12 @@ const MocapVisualAnnotations = {
     css2dRenderer: null,
     labels3d: {},
 
+    // CORREZIONE: Ora tracciamo il braccio SINISTRO (quello che alzi nel video)
+    // 11 = Spalla Sinistra, 13 = Gomito Sinistro, 15 = Polso Sinistro
     trackingJoints: {
-        1: { lmIdx: 12, boneName: 'rightupperarm' },
-        2: { lmIdx: 14, boneName: 'rightforearm' },
-        3: { lmIdx: 16, boneName: 'righthand' }
+        1: { lmIdx: 11, boneName: 'leftupperarm' },
+        2: { lmIdx: 13, boneName: 'leftforearm' },
+        3: { lmIdx: 15, boneName: 'lefthand' }
     },
 
     init() {
