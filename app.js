@@ -728,191 +728,206 @@ if (document.readyState === 'loading') {
 }
 
 // ==========================================
-// 14. VISUAL DEBUGGER (2D OVERLAY & 3D CALIBRATION)
+// 14. VISUAL ANNOTATIONS MODULE (NEW)
 // ==========================================
+// Rimpiazza completamente il vecchio VisualDebugger
+// Implementa overlay 2D (video) e 3D (modello) come da schizzo utente.
 
-const VisualDebugger = {
+// È necessario aggiungere un renderer CSS2D per mostrare etichette HTML sul modello 3D
+// Assicurati che THREE.CSS2DRenderer sia caricato, ad esempio tramite script tag o import map.
+// Se non lo hai, aggiungi questa riga all'inizio del file, dopo gli altri import:
+// import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+const MocapVisualAnnotations = {
     canvas: null,
     ctx: null,
     videoEl: document.getElementById('input_video'),
-    debugMeshes: {},
-    uiPanel: null,
-    activeOffsets: {},
+    css2dRenderer: null,
+    labels3d: {},
 
-    // Mappatura dei landmark MediaPipe per le braccia e busto
-    // 11: Spalla Sx (Video), 12: Spalla Dx, 13: Gomito Sx, 14: Gomito Dx, 15: Polso Sx, 16: Polso Dx
-    targetLandmarks: [11, 12, 13, 14, 15, 16],
-    
-    // Corrispettivi nel rig 3D
-    boneMappings: {
-        11: 'rightupperarm', // Incrociato per il mirroring
-        12: 'leftupperarm',
-        13: 'rightforearm',
-        14: 'leftforearm',
-        15: 'righthand',
-        16: 'lefthand'
+    // Configurazione dei punti da tracciare e numerare, mappando id schizzo a landmark/osso
+    // Schizzo Id 1: Spalla DX, 2: Gomito DX, 3: Mano DX
+    trackingJoints: {
+        1: { lmIdx: 12, boneName: 'rightupperarm' },
+        2: { lmIdx: 14, boneName: 'rightforearm' },
+        3: { lmIdx: 16, boneName: 'righthand' }
     },
 
     init() {
         this.setup2DCanvas();
-        this.setupCalibrationUI();
+        this.setup3DLabels();
         
-        // Hook nel loop di rendering globale per aggiornare i dati UI
+        // Hook nel loop di animazione principale per forzare il re-rendering dei label
         const originalAnimate = window.requestAnimationFrame;
         const self = this;
         window.requestAnimationFrame = function(callback) {
-            self.updateUI();
+            self.update();
             return originalAnimate(callback);
         };
     },
 
-    // --- PARTE 1: OVERLAY 2D SUL VIDEO ---
+    // --- OVERLAY 2D SULLA WEBCAM ---
     setup2DCanvas() {
         if (!this.videoEl) return;
         
         this.canvas = document.createElement('canvas');
-        this.canvas.id = 'mocap-overlay';
+        this.canvas.id = 'mocap-2d-overlay';
         this.canvas.style.cssText = `
             position: absolute; top: 0; left: 0;
-            pointer-events: none; z-index: 10;
+            pointer-events: none; z-index: 100;
         `;
         
-        // Assicuriamoci che il video abbia un parent posizionato per l'absolute positioning
         if (this.videoEl.parentElement) {
             this.videoEl.parentElement.style.position = 'relative';
             this.videoEl.parentElement.appendChild(this.canvas);
         }
-
         this.ctx = this.canvas.getContext('2d');
     },
 
     draw2DOverlay(poseLandmarks) {
         if (!this.ctx || !this.videoEl || !poseLandmarks) return;
 
-        // Sincronizza dimensioni canvas con il video renderizzato
         this.canvas.width = this.videoEl.clientWidth;
         this.canvas.height = this.videoEl.clientHeight;
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
-        this.ctx.fillStyle = 'rgba(255, 0, 0, 0.8)';
-        this.ctx.font = '12px monospace';
+        // Stile generale per i box e il testo
+        const boxSize = 20;
+        const textOffset = 8;
+        this.ctx.font = '14px monospace';
 
-        this.targetLandmarks.forEach(index => {
-            const lm = poseLandmarks[index];
-            if (lm && lm.visibility > 0.4) {
+        for (const [schizzoId, config] of Object.entries(this.trackingJoints)) {
+            const lm = poseLandmarks[config.lmIdx];
+            if (lm && lm.visibility > 0.35) {
                 const x = lm.x * this.canvas.width;
                 const y = lm.y * this.canvas.height;
                 
-                // Disegna quadrato rosso
-                this.ctx.fillRect(x - 6, y - 6, 12, 12);
+                // Disegna box rosso
+                this.ctx.lineWidth = 2;
+                this.ctx.strokeStyle = '#ff0000';
+                this.ctx.strokeRect(x - (boxSize/2), y - (boxSize/2), boxSize, boxSize);
                 
-                // Testo coordinate normalizzate MediaPipe
-                this.ctx.fillStyle = '#fff';
-                this.ctx.fillText(`[${index}] X:${lm.x.toFixed(2)} Y:${lm.y.toFixed(2)}`, x + 10, y + 4);
-                this.ctx.fillStyle = 'rgba(255, 0, 0, 0.8)'; // Resetta colore
+                // Disegna numero dentro (colore di contrasto)
+                this.ctx.fillStyle = '#ff0000';
+                this.ctx.fillText(schizzoId, x - (textOffset/2), y + (textOffset/2));
+
+                // Disegna coordinate per il punto della mano (Id 3), esattamente come nello schizzo
+                if (schizzoId == '3') {
+                    this.ctx.fillStyle = '#00ffcc'; // Colore per i dati, come nello schizzo
+                    // Nello schizzo c'è "X: 30.1 Y: 40.5". Mostrerò i valori 2D normalizzati.
+                    const text = ` X: ${lm.x.toFixed(2)} Y: ${lm.y.toFixed(2)}`;
+                    this.ctx.fillText(text, x + (boxSize/2) + 5, y + (textOffset/2));
+                }
             }
-        });
-    },
-
-    // --- PARTE 2: BOX ROSSI SUL MODELLO 3D ---
-    attach3DDebugBoxes() {
-        if (!model) return;
-
-        const boxGeo = new THREE.BoxGeometry(0.08, 0.08, 0.08); // Cubo di 8cm
-        const boxMat = new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true, depthTest: false });
-
-        Object.values(this.boneMappings).forEach(boneName => {
-            const bone = findBone(boneName);
-            if (bone && !this.debugMeshes[boneName]) {
-                const mesh = new THREE.Mesh(boxGeo, boxMat);
-                // Inizializza l'offset a zero
-                this.activeOffsets[boneName] = { x: 0, y: 0, z: 0 }; 
-                bone.add(mesh); // Diventa figlio dell'osso, ne segue rotazione e posizione
-                this.debugMeshes[boneName] = mesh;
-            }
-        });
-    },
-
-    // --- PARTE 3: PANNELLO DI CONTROLLO COORDINATE E OFFSET ---
-    setupCalibrationUI() {
-        this.uiPanel = document.createElement('div');
-        this.uiPanel.id = 'calibration-panel';
-        this.uiPanel.style.cssText = `
-            position: fixed; top: 16px; right: 16px;
-            background: rgba(15, 20, 30, 0.9); color: #fff;
-            padding: 15px; border-radius: 8px; border: 1px solid #444;
-            font-family: monospace; font-size: 11px; z-index: 10000;
-            max-height: 90vh; overflow-y: auto; width: 320px;
-        `;
-        document.body.appendChild(this.uiPanel);
-        this.renderUIControls();
-    },
-
-    renderUIControls() {
-        let html = `<h3 style="margin: 0 0 10px 0; color: #ff5555;">Calibrazione Pivot (Offset)</h3>`;
-        html += `<p style="color:#aaa; font-size:10px; margin-bottom:15px;">Regola i quadrati rossi per centrarli sul giunto fisico del modello 3D.</p>`;
-
-        Object.values(this.boneMappings).forEach(boneName => {
-            html += `
-                <div style="margin-bottom: 12px; background: rgba(0,0,0,0.5); padding: 8px; border-radius: 4px;">
-                    <strong style="color: #00ffcc;">${boneName.toUpperCase()}</strong><br>
-                    Pos Assoluta: <span id="pos-world-${boneName}" style="color:#888;">-</span><br>
-                    
-                    <div style="display: flex; gap: 4px; margin-top: 6px;">
-                        <label>X <input type="range" min="-0.5" max="0.5" step="0.01" value="0" 
-                            oninput="VisualDebugger.updateOffset('${boneName}', 'x', this.value)"></label>
-                        <span id="off-x-${boneName}">0.00</span>
-                    </div>
-                    <div style="display: flex; gap: 4px;">
-                        <label>Y <input type="range" min="-0.5" max="0.5" step="0.01" value="0" 
-                            oninput="VisualDebugger.updateOffset('${boneName}', 'y', this.value)"></label>
-                        <span id="off-y-${boneName}">0.00</span>
-                    </div>
-                    <div style="display: flex; gap: 4px;">
-                        <label>Z <input type="range" min="-0.5" max="0.5" step="0.01" value="0" 
-                            oninput="VisualDebugger.updateOffset('${boneName}', 'z', this.value)"></label>
-                        <span id="off-z-${boneName}">0.00</span>
-                    </div>
-                </div>
-            `;
-        });
-        
-        const btn = document.createElement('button');
-        btn.innerText = "Aggiorna Nodi 3D";
-        btn.style.cssText = "width:100%; padding: 8px; background:#444; color:#fff; border:none; cursor:pointer;";
-        btn.onclick = () => this.attach3DDebugBoxes();
-        
-        this.uiPanel.innerHTML = html;
-        this.uiPanel.appendChild(btn);
-    },
-
-    updateOffset(boneName, axis, value) {
-        const val = parseFloat(value);
-        this.activeOffsets[boneName][axis] = val;
-        
-        // Aggiorna la posizione locale del quadrato rosso rispetto all'osso
-        if (this.debugMeshes[boneName]) {
-            this.debugMeshes[boneName].position[axis] = val;
         }
-        
-        // Aggiorna il testo a schermo
-        const span = document.getElementById(`off-${axis}-${boneName}`);
-        if (span) span.innerText = val.toFixed(2);
     },
 
-    updateUI() {
-        // Legge le coordinate World (Assolute) delle ossa per mostrare dove si trovano effettivamente nello spazio
-        Object.values(this.boneMappings).forEach(boneName => {
-            const bone = findBone(boneName);
-            const span = document.getElementById(`pos-world-${boneName}`);
-            if (bone && span) {
-                const worldPos = new THREE.Vector3();
-                bone.getWorldPosition(worldPos);
-                span.innerText = `X:${worldPos.x.toFixed(2)} Y:${worldPos.y.toFixed(2)} Z:${worldPos.z.toFixed(2)}`;
+    // --- OVERLAY 3D SUL MODELLO ---
+    setup3DLabels() {
+        if (!typeof CSS2DRenderer === 'undefined') {
+            console.error('THREE.CSS2DRenderer non trovato. Caricalo per gli overlay 3D.');
+            return;
+        }
+
+        // Creiamo il renderer CSS2D e lo agganciamo alla viewport
+        this.css2dRenderer = new CSS2DRenderer();
+        this.css2dRenderer.setSize(viewport.clientWidth, viewport.clientHeight);
+        this.css2dRenderer.domElement.style.position = 'absolute';
+        this.css2dRenderer.domElement.style.top = '0px';
+        this.css2dRenderer.domElement.style.pointerEvents = 'none';
+        viewport.appendChild(this.css2dRenderer.domElement);
+
+        // Creiamo e agganciamo i label ossei una volta che il modello è caricato
+        const self = this;
+        // Ascolta l'evento di completamento del setup del rig per aggiungere le etichette
+        // Dobbiamo assicurarsi che setupRig emetta un evento o modifichi una flag
+        // Per ora, creiamo una funzione che controllerà se il modello esiste
+        this.create3DLabelsOnModelLoaded = () => {
+            if (!model) return; // Riprova finché il modello non è caricato
+
+            for (const [schizzoId, config] of Object.entries(this.trackingJoints)) {
+                if (self.labels3d[schizzoId]) continue; // Salta se già creato
+
+                const bone = findBone(config.boneName);
+                if (bone) {
+                    const labelDiv = self.create3DLabelElement(schizzoId);
+                    const labelObject = new CSS2DObject(labelDiv);
+                    bone.add(labelObject);
+                    // Rimuoviamo il wireframe box dal vecchio debugger
+                    self.labels3d[schizzoId] = labelObject;
+                }
             }
-        });
+        };
+        // Aggiungiamo un check all'init, e all'update per agganciare i label
+        // Se si ha un evento più pulito dal setupRig, usarlo.
+        setTimeout(this.create3DLabelsOnModelLoaded, 500); 
+    },
+
+    create3DLabelElement(schizzoId) {
+        // Creazione dell'HTML div per il label 3D, formattato come nello schizzo
+        const div = document.createElement('div');
+        div.id = `label-3d-${schizzoId}`;
+        div.style.cssText = `
+            font-family: monospace;
+            background: rgba(0, 0, 0, 0.7);
+            color: #00ffcc;
+            padding: 4px;
+            border: 1px solid #ff0000;
+            font-size: 11px;
+            white-space: nowrap;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        `;
+
+        // Box numerato
+        const box = document.createElement('div');
+        box.style.cssText = `
+            width: 14px; height: 14px;
+            border: 1px solid #ff0000;
+            display: flex; justify-content: center; align-items: center;
+            color: #ff0000; font-weight: bold; font-size: 10px;
+        `;
+        box.textContent = schizzoId;
+        div.appendChild(box);
+
+        // Contenitore per i dati coordinate
+        const dataContainer = document.createElement('div');
+        dataContainer.id = `data-3d-${schizzoId}`;
+        
+        // Etichette X/Y/Z con punti interrogativi per la mano (Id 3), come nello schizzo
+        const isHand = schizzoId == '3';
+        const qMark = isHand ? '?' : '';
+        dataContainer.innerHTML = `
+            <span style="color:#aaa;">X:</span><span id="coord-x-${schizzoId}">0.00</span>${qMark} 
+            <span style="color:#aaa;">Y:</span><span id="coord-y-${schizzoId}">0.00</span>${qMark} 
+            <span style="color:#aaa;">Z:</span><span id="coord-z-${schizzoId}">0.00</span>${qMark}
+        `;
+        div.appendChild(dataContainer);
+        
+        return div;
+    },
+
+    update() {
+        this.create3DLabelsOnModelLoaded(); // Assicura che i label siano attaccati se il modello è pronto
+
+        if (!model || !this.css2dRenderer) return;
+
+        // Renderizza il layer CSS2D sopra la scena WebGL
+        this.css2dRenderer.render(scene, camera);
+    },
+    
+    // Funzione helper per ottenere le coordinate world (assolute) di un osso
+    getBoneWorldPos(boneName) {
+        const bone = findBone(boneName);
+        if (bone) {
+            const worldPos = new THREE.Vector3();
+            bone.getWorldPosition(worldPos);
+            return worldPos;
+        }
+        return null;
     }
 };
 
-// Inizializza il debugger al caricamento
-document.addEventListener('DOMContentLoaded', () => VisualDebugger.init());
+// Inizializza il modulo al caricamento
+document.addEventListener('DOMContentLoaded', () => MocapVisualAnnotations.init());
