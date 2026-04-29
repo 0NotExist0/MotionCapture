@@ -5,29 +5,48 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import * as Kalidokit from 'kalidokit';
 
 // ==========================================
-// 1. UI MANAGER (Il nostro Canvas Manager)
+// 1. UI & LOG MANAGER (Il nostro Canvas Debugger)
 // ==========================================
 const UI = {
     overlay: document.getElementById('loading-overlay'),
     text: document.getElementById('loading-text'),
     bar: document.getElementById('progress-bar'),
     status: document.getElementById('status-indicator'),
+    logBox: document.getElementById('loading-logs'),
     
     showLoading(message, progress = 0) {
         this.overlay.style.display = 'flex';
         this.overlay.style.opacity = '1';
-        this.overlay.style.pointerEvents = 'all'; // Blocca i click sottostanti
+        this.overlay.style.pointerEvents = 'all';
         this.text.innerText = message;
         this.bar.style.width = progress + '%';
+        this.log(`Avvio operazione: ${message}`, 'info');
     },
     
     updateProgress(progress) {
         this.bar.style.width = progress + '%';
     },
     
+    log(message, level = 'info') {
+        const line = document.createElement('div');
+        line.className = `log-${level}`;
+        // Aggiungiamo un timestamp come in Unity Console
+        const time = new Date().toLocaleTimeString();
+        line.innerText = `[${time}] ${message}`;
+        this.logBox.appendChild(line);
+        // Auto-scroll verso il basso
+        this.logBox.scrollTop = this.logBox.scrollHeight;
+        
+        // Mantiene anche il log nella console nativa del browser (F12)
+        if(level === 'error') console.error(message);
+        else if(level === 'warn') console.warn(message);
+        else console.log(message);
+    },
+    
     hideLoading() {
+        this.log("Chiusura Overlay...", 'info');
         this.overlay.style.opacity = '0';
-        this.overlay.style.pointerEvents = 'none'; // Lascia passare i click durante la dissolvenza
+        this.overlay.style.pointerEvents = 'none';
         setTimeout(() => {
             this.overlay.style.display = 'none';
         }, 300);
@@ -36,14 +55,14 @@ const UI = {
     setTrackerReady() {
         this.status.innerText = "Tracking Attivo";
         this.status.className = "status-online";
+        this.log("Sistema di tracking attivato con successo.", 'info');
     }
 };
 
-// Inizializzazione
-UI.showLoading("Download Modelli IA (Holistic)...", 10);
+UI.log("Inizializzazione Web Mocap Studio avviata...", "info");
 
 // ==========================================
-// 2. SETUP SCENA 3D (Hierarchy)
+// 2. SETUP SCENA 3D
 // ==========================================
 const viewport = document.getElementById('viewport');
 const scene = new THREE.Scene();
@@ -64,7 +83,6 @@ const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
 dirLight.position.set(5, 5, 5);
 scene.add(dirLight);
 
-// Griglia
 const gridHelper = new THREE.GridHelper(10, 10, 0x444444, 0x222222);
 scene.add(gridHelper);
 
@@ -78,24 +96,27 @@ window.addEventListener('resize', () => {
 });
 
 // ==========================================
-// 3. CARICAMENTO ASSET & PREFAB (Importer)
+// 3. CARICAMENTO ASSET & PREFAB
 // ==========================================
 const setupRig = (loadedModel) => {
+    UI.log("Generazione Gerarchia Ossa...", 'info');
     if (model) scene.remove(model); 
     
     model = loadedModel;
     scene.add(model);
     
     skeleton = {};
+    let boneCount = 0;
     model.traverse((obj) => {
         if (obj.isBone) {
             const standardName = obj.name.replace('mixamorig', '').replace(':', '').toLowerCase();
             skeleton[standardName] = obj;
+            boneCount++;
         }
     });
     
-    console.log("Rig Setup Completato. Ossa:", Object.keys(skeleton));
-    UI.hideLoading(); // Sblocca SEMPRE la UI alla fine
+    UI.log(`Rig Setup Completato. Trovate ${boneCount} ossa.`, 'info');
+    UI.hideLoading(); 
 };
 
 document.getElementById('file-upload').addEventListener('change', (e) => {
@@ -103,6 +124,7 @@ document.getElementById('file-upload').addEventListener('change', (e) => {
     if (!file) return;
     
     UI.showLoading(`Lettura file ${file.name}...`, 0);
+    UI.log(`Formato file rilevato: ${file.name.split('.').pop()}`, 'info');
     
     const extension = file.name.split('.').pop().toLowerCase();
     const reader = new FileReader();
@@ -115,35 +137,41 @@ document.getElementById('file-upload').addEventListener('change', (e) => {
     };
     
     reader.onload = (event) => {
-        UI.showLoading("Estrazione e Compilazione Mesh...", 100);
+        UI.log("File caricato in memoria (ArrayBuffer). Inizio Parsing...", 'info');
+        UI.updateProgress(100);
         
         setTimeout(() => {
             const contents = event.target.result;
             
             try {
                 if (extension === 'gltf' || extension === 'glb') {
+                    UI.log("Avvio GLTFLoader...", 'info');
                     const loader = new GLTFLoader();
                     loader.parse(contents, '', (gltf) => {
+                        UI.log("GLTF Parsato con successo.", 'info');
                         setupRig(gltf.scene);
                     }, (err) => { 
-                        console.error("Errore parse GLTF:", err); 
+                        UI.log(`Errore loader GLTF: ${err}`, 'error');
                         alert("Impossibile leggere il file GLB/GLTF.");
                         UI.hideLoading(); 
                     });
                     
                 } else if (extension === 'fbx') {
+                    UI.log("Avvio FBXLoader. Questa operazione può richiedere tempo...", 'warn');
                     const loader = new FBXLoader();
                     const fbxModel = loader.parse(contents);
+                    UI.log("FBX Parsato con successo. Applico correzione scala 0.01.", 'info');
                     fbxModel.scale.set(0.01, 0.01, 0.01); 
                     setupRig(fbxModel);
                 } else {
+                    UI.log(`Formato non supportato: ${extension}`, 'error');
                     alert("Formato non supportato.");
                     UI.hideLoading();
                 }
             } catch (err) {
-                console.error("Eccezione durante il caricamento:", err);
-                alert("Errore critico durante il caricamento del file. Assicurati sia un formato valido (FBX Binario).");
-                UI.hideLoading(); // Evita freeze se il file è corrotto
+                UI.log(`Eccezione Critica durante il parsing: ${err.message}`, 'error');
+                alert("Errore critico durante il caricamento del file.");
+                UI.hideLoading();
             }
         }, 100); 
     };
@@ -152,7 +180,7 @@ document.getElementById('file-upload').addEventListener('change', (e) => {
 });
 
 // ==========================================
-// 4. IK SOLVER (Update Loop)
+// 4. IK SOLVER
 // ==========================================
 const rigBone = (name, rotation, lerp = 0.3) => {
     const bone = skeleton[name.toLowerCase()];
@@ -187,11 +215,17 @@ const onResults = (results) => {
 };
 
 // ==========================================
-// 5. INIZIALIZZAZIONE MEDIAPIPE (Awake/Start)
+// 5. INIZIALIZZAZIONE MEDIAPIPE E WEBCAM
 // ==========================================
+UI.showLoading("Download Modelli IA MediaPipe...", 10);
+UI.log("Connessione ai CDN di jsdelivr per Holistic...", 'info');
+
 try {
     const holistic = new window.Holistic({
-        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`
+        locateFile: (file) => {
+            UI.log(`Richiesta file remoto: ${file}`, 'info');
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`;
+        }
     });
 
     holistic.setOptions({
@@ -202,27 +236,31 @@ try {
     });
     holistic.onResults(onResults);
 
+    UI.log("Configurazione fotocamera in corso (Accetta i permessi nel browser)...", 'warn');
     const cameraUtils = new window.Camera(videoElement, {
         onFrame: async () => { await holistic.send({image: videoElement}); },
         width: 640, height: 480
     });
     
     cameraUtils.start().then(() => {
+        UI.log("Webcam avviata con successo. Avvio elaborazione WebAssembly...", 'info');
         UI.updateProgress(100);
         UI.setTrackerReady();
         
-        // IL FIX: Nascondiamo l'Overlay in ogni caso, così puoi usare la UI!
         setTimeout(() => {
             UI.hideLoading();
-        }, 500);
+        }, 800);
         
+    }).catch(err => {
+        UI.log(`Errore avvio fotocamera: ${err.message}`, 'error');
+        document.getElementById('loading-text').innerText = "Accesso alla Fotocamera Negato.";
     });
 } catch (e) {
-    console.error("Errore inizializzazione MediaPipe:", e);
-    document.getElementById('loading-text').innerText = "Errore di Inizializzazione della Telecamera.";
+    UI.log(`Errore fatale inizializzazione MediaPipe: ${e.message}`, 'error');
+    document.getElementById('loading-text').innerText = "Errore di Inizializzazione.";
 }
 
-// Render Loop Principale
+// Main Update Loop
 function animate() {
     requestAnimationFrame(animate);
     renderer.render(scene, camera);
