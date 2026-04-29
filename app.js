@@ -267,7 +267,6 @@ const setupRig = (loadedModel) => {
 
     const boneNames = Object.keys(skeleton);
     console.log("=== OSSA NORMALIZZATE ===", boneNames);
-    UI.log(`Ossa: ${boneNames.slice(0, 8).join(', ')}...`, 'info');
 
     if (boneCount === 0) {
         UI.log("ERRORE: nessuna osso trovata! Il modello non ha SkinnedMesh riggata.", 'error');
@@ -337,7 +336,7 @@ const rigBone = (name, rotation, lerp = 0.3) => {
 };
 
 // ==========================================
-// 9. CALLBACK MEDIAPIPE (Corretta con Try-Catch e Null Checks)
+// 9. CALLBACK MEDIAPIPE (Fix Assi Locali)
 // ==========================================
 const videoElement = document.getElementById('input_video');
 
@@ -349,7 +348,6 @@ const onResults = (results) => {
     if (!mocapActive || !model) return;
 
     // --- LAYER POSE ---
-    // FIX: Controlliamo sia i poseLandmarks (2D) che i poseWorldLandmarks (3D)
     if (results.poseLandmarks && results.poseWorldLandmarks) {
         try {
             const rp = Kalidokit.Pose.solve(
@@ -359,6 +357,8 @@ const onResults = (results) => {
             );
             
             if (rp) {
+                // Se anche il corpo o le braccia dovessero muoversi al contrario, 
+                // basterà mettere un meno (-) davanti a rp.OSSO.rotation.x o .z
                 if (rp.Hips)          rigBone("hips",          rp.Hips.rotation,          0.1);
                 if (rp.Spine)         rigBone("spine",         rp.Spine.rotation,         0.3);
                 if (rp.RightUpperArm) rigBone("rightupperarm", rp.RightUpperArm.rotation, 0.3);
@@ -372,10 +372,7 @@ const onResults = (results) => {
                 if (rp.LeftUpperLeg)  rigBone("leftupperleg",  rp.LeftUpperLeg.rotation,  0.3);
                 if (rp.LeftLowerLeg)  rigBone("leftlowerleg",  rp.LeftLowerLeg.rotation,  0.3);
             }
-        } catch (error) {
-            // Se MediaPipe invia un array corrotto o mancante (es. indice 11), skippiamo il frame
-            // senza far crashare l'intera applicazione.
-        }
+        } catch (error) {}
     }
 
     // --- LAYER FACE ---
@@ -387,12 +384,13 @@ const onResults = (results) => {
             
             if (rf && rf.head) {
                 const h = rf.head;
-                rigBone("neck", { x: h.x * 0.5, y: h.y * 0.5, z: h.z * 0.5 }, 0.5);
-                rigBone("head", { x: h.x * 0.5, y: h.y * 0.5, z: h.z * 0.5 }, 0.5);
+                // FIX MIXAMO: Invertiamo l'asse X e Z moltiplicandoli per -1.
+                // h.x controlla il Pitch (Su e Giù). h.z controlla il Roll (Inclinazione).
+                // h.y (Yaw / rotazione destra-sinistra) di solito coincide e non serve invertirlo.
+                rigBone("neck", { x: -h.x * 0.5, y: h.y * 0.5, z: -h.z * 0.5 }, 0.5);
+                rigBone("head", { x: -h.x * 0.5, y: h.y * 0.5, z: -h.z * 0.5 }, 0.5);
             }
-        } catch (error) {
-            // Ignoriamo l'errore del singolo frame sul volto
-        }
+        } catch (error) {}
     }
 };
 
