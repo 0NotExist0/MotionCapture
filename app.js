@@ -397,101 +397,43 @@ const videoElement = document.getElementById('input_video');
 
 const onResults = (results) => {
     dbg.updateFrame();
+    
+    // --- AGGIUNTA PER L'OVERLAY 2D SULLA WEBCAM ---
+    if (typeof MocapVisualAnnotations !== 'undefined') {
+        MocapVisualAnnotations.draw2DOverlay(results.poseLandmarks);
+    }
+    // -----------------------------------------------
+
     if (!mocapActive || !model) return;
 
     const poseLms = results.poseLandmarks;
     const faceLms = results.faceLandmarks;
     const worldLandmarks = results.poseWorldLandmarks || results.ea || results.za || null;
 
-    const trackingState = {
-        testa: !!faceLms,
-        corpo: isPartVisible(poseLms, [11, 12]), 
-        braccioSx: isPartVisible(poseLms, [13, 15]), 
-        braccioDx: isPartVisible(poseLms, [14, 16]), 
-        gambaSx: isPartVisible(poseLms, [25, 27]), 
-        gambaDx: isPartVisible(poseLms, [26, 28])
-    };
+    // ... [il resto del tuo codice originale per il tracciamento e il rig] ...
 
-    dbg.updateParts(trackingState);
-
-    // --- MAPPATURA ASSI SPECIFICA PER RIG MIXAMO ---
-    
-    // Testa e Busto mantengono un mapping abbastanza standard, 
-    // ma invertiamo la Z per evitare flessioni anomale del torso.
-    const mixamoSpineMap = { x: 'x', y: 'y', z: 'z', ix: 1, iy: 1, iz: -1 }; 
-
-    // BRACCIA MIXAMO: Qui avviene la magia. 
-    // Scambiamo la Y con la Z (o X con Y) perché in Mixamo l'asse del braccio corre in direzioni diverse.
-    // L'input DX guida il lato SX dell'avatar (Mirroring da specchio).
-    
-    // Braccio Sinistro dell'Avatar (Riceve input braccio destro webcam)
-    const mixamoLeftArmMap = { x: 'z', y: 'y', z: 'x', ix: -1, iy: 1, iz: 1 }; 
-    
-    // Braccio Destro dell'Avatar (Riceve input braccio sinistro webcam)
-    // In Mixamo il lato destro è capovolto, quindi invertiamo pesantemente i segni di Y e Z
-    const mixamoRightArmMap = { x: 'z', y: 'y', z: 'x', ix: -1, iy: -1, iz: -1 }; 
-
-    // Gambe Mixamo (Solitamente la Y è invertita)
-    const mixamoLegMap = { x: 'x', y: 'y', z: 'z', ix: 1, iy: -1, iz: 1 };
-
-    // --- LAYER POSE ---
-    if (poseLms && worldLandmarks) {
-        try {
-            const rp = Kalidokit.Pose.solve(
-                worldLandmarks, poseLms, { runtime: "mediapipe", video: videoElement }
-            );
-
-            dbg.setKali(!!rp);
-
-            if (rp) {
-                // CORPO
-                setBoneTarget("hips", rp.Hips ? rp.Hips.rotation : null, 0.3, mixamoSpineMap, trackingState.corpo);
-                setBoneTarget("spine", rp.Spine, 0.3, mixamoSpineMap, trackingState.corpo);
-
-                // MIRRORING LOGICO INCROCIATO SULLE BRACCIA MIXAMO
+    // --- AGGIUNTA PER AGGIORNARE LE COORDINATE 3D SUL MODELLO ---
+    if (trackingState.corpo) {
+        for (const [schizzoId, config] of Object.entries(MocapVisualAnnotations.trackingJoints)) {
+            // Otteniamo le coordinate world (assolute) dell'osso
+            const bone = findBone(config.boneName);
+            if (bone) {
+                const worldPos = new THREE.Vector3();
+                bone.getWorldPosition(worldPos);
                 
-                // Input Destro Utente -> Osso Sinistro Avatar
-                setBoneTarget("leftupperarm",  rp.RightUpperArm, 0.35, mixamoLeftArmMap, trackingState.braccioDx);
-                setBoneTarget("leftforearm",   rp.RightLowerArm, 0.35, mixamoLeftArmMap, trackingState.braccioDx);
-                setBoneTarget("lefthand",      rp.RightHand,     0.35, mixamoLeftArmMap, trackingState.braccioDx);
-
-                // Input Sinistro Utente -> Osso Destro Avatar
-                setBoneTarget("rightupperarm", rp.LeftUpperArm, 0.35, mixamoRightArmMap, trackingState.braccioSx);
-                setBoneTarget("rightforearm",  rp.LeftLowerArm, 0.35, mixamoRightArmMap, trackingState.braccioSx);
-                setBoneTarget("righthand",     rp.LeftHand,     0.35, mixamoRightArmMap, trackingState.braccioSx);
-
-                // GAMBE
-                setBoneTarget("leftupperleg", rp.RightUpperLeg, 0.3, mixamoLegMap, trackingState.gambaDx);
-                setBoneTarget("leftlowerleg", rp.RightLowerLeg, 0.3, mixamoLegMap, trackingState.gambaDx);
-
-                setBoneTarget("rightupperleg",  rp.LeftUpperLeg,  0.3, mixamoLegMap, trackingState.gambaSx);
-                setBoneTarget("rightlowerleg",  rp.LeftLowerLeg,  0.3, mixamoLegMap, trackingState.gambaSx);
+                // Aggiorniamo l'HTML dei label con i valori reali
+                const spanX = document.getElementById(`coord-x-${schizzoId}`);
+                const spanY = document.getElementById(`coord-y-${schizzoId}`);
+                const spanZ = document.getElementById(`coord-z-${schizzoId}`);
+                if (spanX && spanY && spanZ) {
+                    spanX.innerText = worldPos.x.toFixed(2);
+                    spanY.innerText = worldPos.y.toFixed(2);
+                    spanZ.innerText = worldPos.z.toFixed(2);
+                }
             }
-        } catch (error) {
-            console.warn("[Pose solve error]", error);
-        }
-    } else {
-        dbg.setKali(false);
-    }
-
-    // --- LAYER FACE ---
-    if (trackingState.testa) {
-        try {
-            const rf = Kalidokit.Face.solve(faceLms, {
-                runtime: "mediapipe", video: videoElement
-            });
-
-            if (rf && rf.head) {
-                const h = rf.head;
-                // Eulers custom per la rotazione specchiata della testa
-                const headRot = { x: -h.x * 0.5, y: -h.y * 0.5, z: h.z * 0.5 };
-                setBoneTarget("neck", headRot, 0.35, { x: 'x', y: 'y', z: 'z', ix: 1, iy: 1, iz: 1 }, true);
-                setBoneTarget("head", headRot, 0.35, { x: 'x', y: 'y', z: 'z', ix: 1, iy: 1, iz: 1 }, true);
-            }
-        } catch (error) {
-            console.warn("[Face solve error]", error);
         }
     }
+    // ------------------------------------------------------------------
 };
 
 // ==========================================
